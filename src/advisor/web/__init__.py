@@ -24,6 +24,7 @@ from advisor.explorer import RUN_GOALS, adventure_node, is_running, tree
 from advisor.hints import hints as one_change_hints
 from advisor.history import write_history
 from advisor.next_steps import NEXT_STEP_GOALS, TOP_STEPS, FocusSets, Steps, measure_adventure, next_steps
+from advisor.next_steps import ready_to_complete
 from advisor.game_client import DEFAULT_LOG, HttpTransport, LiveGameClient, OfflineGameClient, Transport
 from advisor.recommendation import recommend, with_search_problem
 from advisor.recompute import ExecutorFactory, Recompute, process_pool
@@ -87,7 +88,7 @@ def create_app(
         calibration = model_status.push_calibration(catalogue, account, models)
         results.update(raw, catalogue, account, models, precompute=refreshed)
         hints.clear()
-        steps.update(raw, account)
+        steps.update(raw, account, catalogue, models)  # with the Area Set Cache and Model Statuses (#36)
         steps.ensure((a, g) for g in NEXT_STEP_GOALS for a in focus.get(catalogue, account, g))
 
     load(raw, refreshed=False)
@@ -288,6 +289,16 @@ def create_app(
             "total": len(ranked),
         }
         return _TEMPLATES.TemplateResponse(request, "_next_steps.html", context)
+
+    @app.get("/next-steps/ready", response_class=HTMLResponse)
+    def ready_list(request: Request) -> HTMLResponse:
+        """Push's Ready to complete block, loaded by the Push tab (#36)."""
+
+        def verdict_for(adventure, patron):
+            return results.get(adventure, "Push", patron)[0].push_verdict
+
+        ready = ready_to_complete(catalogue, account, verdict_for)
+        return _TEMPLATES.TemplateResponse(request, "_ready.html", {"ready": ready})
 
     @app.get("/champions/{champion_id}", response_class=HTMLResponse)
     def champion_detail(request: Request, champion_id: int) -> HTMLResponse:
