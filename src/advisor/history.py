@@ -8,17 +8,20 @@ features can compare progress and rates over time (#20).
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from typing import Any
 
 from advisor.account import Account, parse_account
-from advisor.catalogue import _table, parse_catalogue
+from advisor.catalogue import game_version, parse_catalogue
 from advisor.champion_models import ChampionModels
 from advisor.push_verdict import instance_estimate
 from advisor.request_log import RawResponses
 from advisor.store import Store
 
 HISTORY_VERSION = 1
+
+_log = logging.getLogger(__name__)
 
 _CONTRACT_BUFF_IDS = frozenset({31, 32, 33})  # gear contract buffs (#20); count = inventory_amount
 _BEST_AREA_PREFIX = "highest_area_completed_ever_c"
@@ -28,16 +31,21 @@ _TIME_FIELDS = frozenset({"server_time"})
 def write_history(store: Store, raw: RawResponses) -> None:
     """The History Record writer: called after each successful live Refresh. Skips the record
     when nothing but the time changed since the last one."""
-    definitions = store.load_definitions()
-    history = store.load_history()
-    last = history[-1] if history else None
-    record = history_record(raw, definitions.checksum if definitions else None, last)
+    # The Refresh itself succeeded: a lost History Record must not turn it into an error.
+    try:
+        definitions = store.load_definitions()
+        history = store.load_history()
+        last = history[-1] if history else None
+        record = history_record(raw, definitions.checksum if definitions else None, last)
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        _log.warning("History Record skipped: the snapshot couldn't be read (%s: %s)", type(error).__name__, error)
+        return
     if last is not None and _sans_time(last) == _sans_time(record):
         return
     try:
         store.append_history(record)
-    except OSError:
-        pass  # the Refresh itself succeeded; a lost History Record must not turn it into an error
+    except OSError as error:
+        _log.warning("History Record not saved: %s", error)
 
 
 def _sans_time(record: Mapping[str, Any]) -> Any:
@@ -57,7 +65,7 @@ def history_record(
     record = {
         "version": HISTORY_VERSION,
         "server_time": server_time,
-        "game_version": _game_version(raw),
+        "game_version": game_version(raw),
         "definitions_checksum": definitions_checksum,
         "totals": _totals(details),
         "instances": [_instance(i, server_time) for i in details.get("game_instances") or ()],
@@ -133,12 +141,6 @@ def _push_estimates(raw: RawResponses, account: Account) -> dict[int, dict[str, 
                 "verdict": verdict.label,
             }
     return estimates
-
-
-def _game_version(raw: RawResponses) -> str | None:
-    """The newest changelog entry's version, e.g. "1.235.1 (v651)"."""
-    entries = [e for e in _table(raw, "changelog_defines") if e.get("version")]
-    return str(max(entries, key=lambda e: int(e["id"]))["version"]) if entries else None
 
 
 def _number(value: Any) -> float | None:

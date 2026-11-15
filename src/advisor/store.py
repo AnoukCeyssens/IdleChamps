@@ -7,8 +7,8 @@ field, each file written atomically (temp file + rename):
   delta a Refresh brings.
 - `snapshot.json.gz`: the latest credential-stripped Player Snapshot subset (the Refresh's
   responses minus definitions, shop/promo and server stats).
-- `area_sets.json.gz`: the Area Set Cache (monster placement per `area_set_id`, each with the game
-  version it was last seen under); grows with every Refresh, never expires (`advisor.area_sets`).
+- `area_sets.json.gz`: the Area Set Cache (every Area Set seen, by `area_set_id`, each with the
+  game version it was last seen under); grows with every Refresh, never expires (`advisor.area_sets`).
 - `results.json.gz`: the precomputed Formation Recommendations (`recompute.py`), with the key
   they were computed for (recommendation key, definitions checksum, code fingerprint).
 - `model_status.json.gz`: the Model Status ledger (`advisor.model_status`): each reconstructed

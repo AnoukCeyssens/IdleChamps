@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import threading
 from collections.abc import Callable, Iterable
@@ -30,6 +31,8 @@ from advisor.recommendation import FormationRecommendation, recommend
 from advisor.request_log import RawResponses
 from advisor.results_codec import Decoder, Encoder
 from advisor.store import Store
+
+_log = logging.getLogger(__name__)
 
 ResultKey = tuple[int, str, int | None]  # (adventure id, Run Goal, patron id or None)
 ExecutorFactory = Callable[[Callable, tuple], Executor]  # (worker initializer, its args) -> pool
@@ -217,8 +220,8 @@ class Recompute:
                 continue  # a field the codec can't write yet: recomputed on demand after a restart
         try:
             self._store.save_results(list(key), entries)
-        except OSError:
-            pass  # kept in memory; the next Refresh tries again
+        except OSError as error:  # kept in memory; the next Refresh tries again
+            _log.warning("Formation Recommendations not saved: %s", error)
 
     def _load_persisted(self, key: tuple, catalogue: Catalogue) -> bool:
         if self._store is None:

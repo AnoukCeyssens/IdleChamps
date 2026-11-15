@@ -258,7 +258,7 @@ class Catalogue:
     # Attack cooldowns in seconds by attack id; only those whose attack definitions have been loaded.
     attack_cooldowns: Mapping[int, float] = field(default_factory=dict)
     attacks: Mapping[int, Attack] = field(default_factory=dict)
-    # The Area Set Cache (#19): monster placement by `area_set_id`. In offline mode the sets in the
+    # The Area Set Cache (#19): every Area Set kept, by `area_set_id`. In offline mode the sets in the
     # log; in live mode every set any Refresh brought (see `advisor.area_sets`).
     area_sets: Mapping = field(default_factory=dict)
     game_version: str | None = None  # the newest changelog entry's version

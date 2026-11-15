@@ -199,3 +199,19 @@ def test_the_record_holds_account_totals_and_each_running_games_run(live):
     assert second["push_estimate"] == {
         "expected_area": 85, "area": 84, "band": 34, "objective": 100, "verdict": "Borderline",
     }
+
+
+def test_a_history_record_that_cant_be_built_leaves_the_refresh_successful(live, caplog):
+    from conftest import rows
+
+    body = user_details()
+    body["details"]["reset_currencies"] = [{"total_earned": 5}]  # a currency without its id: the record can't be built
+    live.server.queue("getuserdetails", body)
+
+    page = live.start().get("/champions").text
+
+    assert _history(live) == []
+    assert not rows(page, "refresh-failed")
+    assert rows(page, "refresh-state")[0]["text"] == "refreshed 0 s ago"
+    assert rows(page, "champion")  # the snapshot was loaded
+    assert "History Record" in caplog.text

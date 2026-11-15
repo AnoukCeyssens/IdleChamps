@@ -24,6 +24,7 @@ recommendation key (`Steps`), and on demand otherwise.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor, Future
@@ -39,6 +40,8 @@ from advisor.recompute import _area_sets_key, _statuses_key
 from advisor.recommendation import FormationRecommendation, recommend, with_search_problem
 from advisor.request_log import RawResponses
 from advisor.store import Store
+
+_log = logging.getLogger(__name__)
 
 # Run Goals with a Next Steps tab (Push's opens with Ready to complete, #36).
 NEXT_STEP_GOALS = ("Push", "Gem Farm", "Gold Farm")
@@ -127,8 +130,8 @@ class FocusSets:
         if self._store is not None:
             try:
                 self._store.save_focus(saved)
-            except OSError:
-                pass  # kept in memory
+            except OSError as error:  # kept in memory
+                _log.warning("Focus Sets not saved: %s", error)
 
 
 # --- Ready to complete (Push) ------------------------------------------------------------------
