@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, replace
 
 from advisor.account import Account
 from advisor.catalogue import Adventure, Catalogue, Champion, Feat, Patron, Restriction, SpecializationOption
+from advisor.comparisons import Comparison, compare, given_formations
 from advisor.champion_models import BREAK_TIME_S, ChampionModels, Contribution, ModelStatus, Seat
 from advisor.formation_search import EXACT_TIME_LIMIT_S, Candidate, SearchProblem, exact_search, exhaustive_search, search
 from advisor.push_verdict import PushVerdict, breaking_needs, push_verdict
@@ -96,7 +97,7 @@ class FormationRecommendation:
     modron: ModronSetup | None = None
     # Filled by later tickets.
     hints: tuple = ()
-    comparisons: tuple = ()
+    comparisons: tuple[Comparison, ...] = ()  # community and saved formations (#39)
     push_verdict: PushVerdict | None = None  # Push only
     # The search this recommendation came from (candidates after restrictions), for one-change hints (#34).
     # Derived search state: not persisted (see results_codec), rebuilt by `with_search_problem`.
@@ -149,8 +150,11 @@ def recommend(
         return infeasible(_missing_piece(rejected_by, rules, names), left_out)
     by_id = {c.champion_id: c for c in candidates}
     problem = _search_problem(catalogue, account, usable, candidates)
+    # Community and saved formations for this adventure and Run Goal: seeds, then comparisons (#39).
+    given = given_formations(catalogue, account, adventure, run_goal, problem)
+    seeds = tuple(g.seed for g in given if g.seed)
 
-    needs = breaking_needs(catalogue, adventure, patron) if run_goal == "Push" else ()
+    needs =breaking_needs(catalogue, adventure, patron) if run_goal == "Push" else ()
 
     def plain_scorer(main):
         return models.scorer(adventure.layout, run_goal, main, adventure=adventure)
@@ -171,14 +175,14 @@ def recommend(
             found = solve(problem, breaking_scorer)
         return found
 
-    result = run(exhaustive_search if solver == "exhaustive" else _fast(budget_s))
+    result = run(exhaustive_search if solver == "exhaustive" else _fast(budget_s, seeds))
     exact_solve = None
     if solver == "exact" and result is not None:
         fast = result
         scorer_for = breaking_scorer if needs and not breaks_all(fast) else plain_scorer
         result = exact_search(problem, scorer_for, exact_time_s, incumbent=fast)
         if scorer_for is plain_scorer and needs and not breaks_all(result):
-            incumbent = _fast(budget_s)(problem, breaking_scorer)
+            incumbent = _fast(budget_s, seeds)(problem, breaking_scorer)
             result = exact_search(problem, breaking_scorer, exact_time_s, incumbent=incumbent)
         exact_solve = "improved" if result.exact else "proven" if result.gap_pct == 0 else "timed_out"
     if result is not None:
@@ -277,6 +281,7 @@ def recommend(
         problem=problem,
         exact_solve=exact_solve,
         push_verdict=verdict,
+        comparisons=compare(catalogue, models, run_goal, given, problem, scorer_for, result),
     )
 
 
@@ -358,8 +363,8 @@ def _level(account: Account, champion_id: int) -> int:
     return owned.level if owned else 0
 
 
-def _fast(budget_s: float):
-    return lambda problem, scorer_for: search(problem, scorer_for, budget_s)
+def _fast(budget_s: float, seeds=()):
+    return lambda problem, scorer_for: search(problem, scorer_for, budget_s, seeds)
 
 
 def _empty_seats(adventure: Adventure) -> tuple[SeatRecommendation, ...]:

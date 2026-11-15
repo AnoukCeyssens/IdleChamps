@@ -89,7 +89,11 @@ _FILL = 1e-6  # tie-break: a free slot is filled when it costs nothing
 _FORCE = 1e6  # a forced champion is always placed
 
 
-def search(problem: SearchProblem, scorer_for: ScorerFor, budget_s: float = 0.1) -> SearchResult | None:
+def search(
+    problem: SearchProblem, scorer_for: ScorerFor, budget_s: float = 0.1, seeds: Sequence[tuple[Seat, ...]] = ()
+) -> SearchResult | None:
+    """`seeds`: legal formations to start the local search from too (curated and saved formations,
+    #39); each seated Main DPS candidate is tried as their Main DPS. They never replace a better find."""
     started = time.perf_counter()
     plans = []
     for main in _main_seats(problem):
@@ -101,6 +105,14 @@ def search(problem: SearchProblem, scorer_for: ScorerFor, budget_s: float = 0.1)
         return None
     plans.sort(key=lambda p: -p[0])  # most promising (Main DPS, slot) first
     best: tuple[FormationScore, Seat, tuple[Seat, ...]] | None = None
+    for seed in seeds:
+        for main in seed:
+            if main.champion_id not in problem.main_dps_ids:
+                continue
+            scorer = scorer_for(main)
+            seats, score = _improve(problem, main, scorer, tuple(seed), deadline=started + budget_s)
+            if best is None or score.value > best[0].value + 1e-12:
+                best = (score, main, seats)
     for explored, (bound, main, scorer, seats) in enumerate(plans):
         if best is not None and bound <= best[0].value + 1e-12:
             break  # neither this nor any later (Main DPS, slot) can beat what was found
@@ -113,6 +125,29 @@ def search(problem: SearchProblem, scorer_for: ScorerFor, budget_s: float = 0.1)
     upper_bound = max(plans[0][0], best[0].value)
     gap = _gap_pct(upper_bound, best[0].value)
     return _add_setup(problem, scorer_for, SearchResult(best[1], best[2], best[0], upper_bound, gap, exact=False))
+
+
+def evaluate(
+    problem: SearchProblem, scorer_for: ScorerFor, placements: Sequence[tuple[int, int, tuple[Loadout, ...]]]
+) -> SearchResult | None:
+    """Scores one given formation (champion id, slot, the loadouts it may use) the way `search`
+    scores its own: each seated Main DPS candidate tried as the Main DPS, each seat's best loadout,
+    then familiars and the modron core placed; any seated champion when none is a Main DPS candidate
+    (a formation built for speed, not damage). None when it seats nobody."""
+    best = None
+    mains = [p for p in placements if p[0] in problem.main_dps_ids] or list(placements)
+    for champion_id, slot, loadouts in mains:
+        for main_loadout in loadouts:
+            main = Seat(champion_id, slot, main_loadout)
+            scorer = scorer_for(main)
+            seats = (main, *(
+                max((Seat(c, s, l) for l in options), key=scorer.bound)
+                for c, s, options in placements if c != champion_id
+            ))
+            score = scorer.score(seats)
+            if best is None or score.value > best.score.value + 1e-12:
+                best = SearchResult(main, seats, score, score.value, 0.0, exact=False)
+    return _add_setup(problem, scorer_for, best) if best is not None else None
 
 
 def _add_setup(problem: SearchProblem, scorer_for: ScorerFor, result: SearchResult) -> SearchResult:

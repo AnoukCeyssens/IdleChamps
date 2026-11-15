@@ -20,10 +20,12 @@ from advisor.area_sets import merge as merge_area_sets
 from advisor.catalogue import GEAR_SLOTS, ROLE_TAGS, Catalogue, parse_catalogue
 from advisor import model_status
 from advisor.champion_models import ChampionModels, ModelStatus
+from advisor.champion_usage import champion_steps, seated_in
 from advisor.explorer import RUN_GOALS, adventure_node, is_running, tree
 from advisor.hints import hints as one_change_hints
 from advisor.history import write_history
 from advisor.next_steps import NEXT_STEP_GOALS, TOP_STEPS, FocusSets, Steps, measure_adventure, next_steps
+from advisor.next_steps import ready_to_complete
 from advisor.game_client import DEFAULT_LOG, HttpTransport, LiveGameClient, OfflineGameClient, Transport
 from advisor.recommendation import recommend, with_search_problem
 from advisor.recompute import ExecutorFactory, Recompute, process_pool
@@ -60,12 +62,13 @@ def create_app(
     hints: dict[tuple, tuple] = {}  # "What would make this better", computed when a recommendation is opened
     ledger = model_status.from_json(store.load_model_status()) if store is not None else model_status.Ledger()
     checks: tuple[model_status.DamageCheck, ...] = ()  # the live damage checks on the shown snapshot
-    focus = focus or FocusSets()  # Next Steps' Focus Sets (#35)
+    calibration: tuple[model_status.CalibrationFlag, ...] = ()  # Push calibration flags on it (#39)
+    focus =focus or FocusSets()  # Next Steps' Focus Sets (#35)
     steps = steps or Steps()  # each Focus adventure's measured one-changes
 
     def load(responses: RawResponses, *, refreshed: bool = True) -> None:
         """(Re)build everything the pages show from raw responses (at start and after a Refresh)."""
-        nonlocal raw, catalogue, account, models, ledger, checks
+        nonlocal raw, catalogue, account, models, ledger, checks, calibration
         if "getdefinitions" not in responses or "getuserdetails" not in responses:
             return  # live mode before the first Refresh: nothing to show yet
         raw = responses
@@ -83,9 +86,10 @@ def create_app(
             except OSError:
                 pass  # kept in memory; the next Refresh saves it
         models = ChampionModels(catalogue, account, statuses=ledger.statuses())
+        calibration = model_status.push_calibration(catalogue, account, models)
         results.update(raw, catalogue, account, models, precompute=refreshed)
         hints.clear()
-        steps.update(raw, account)
+        steps.update(raw, account, catalogue, models)  # with the Area Set Cache and Model Statuses (#36)
         steps.ensure((a, g) for g in NEXT_STEP_GOALS for a in focus.get(catalogue, account, g))
 
     load(raw, refreshed=False)
@@ -140,7 +144,8 @@ def create_app(
             )
         context = {
             "table": table,
-            "flags": ledger.open_flags(),
+            "flags": ledger.open_flags() + model_status.community_flags(results.held()),
+            "calibration": calibration,
             "checks": checks,
             "coverage": coverage,
             "history": history,
@@ -256,11 +261,11 @@ def create_app(
         }
         return _TEMPLATES.TemplateResponse(request, "next_steps.html", context)
 
-    @app.get("/next-steps/steps", response_class=HTMLResponse)
-    def next_steps_list(request: Request, goal: str = NEXT_STEP_GOALS[0], all: bool = False) -> HTMLResponse:
-        """The ranked steps, loaded by the Next Steps tab; measured in the background in live mode,
-        on demand otherwise."""
-        goal = goal if goal in NEXT_STEP_GOALS else NEXT_STEP_GOALS[0]
+    def _ranked_steps(goal: str) -> tuple[tuple, int, int]:
+        """(the Run Goal's ranked Next Steps, Focus adventures still measuring in the background,
+        Focus Set size). Steps come from the steps cache (background-measured in live mode, with
+        the Area Set Cache and Model Statuses); what's missing is measured on demand. Shared by the
+        Next Steps tab and the champion page (#37)."""
         adventures = [a for i in focus.get(catalogue, account, goal) if (a := catalogue.adventure(i))]
         steps.ensure((a.id, goal) for a in adventures)
         measured, waiting = {}, 0
@@ -276,15 +281,33 @@ def create_app(
                     steps.put(adventure.id, goal, found)
             measured[adventure.id] = found
         ranked = () if waiting else next_steps(catalogue, account, adventures, measured)
+        return ranked, waiting, len(adventures)
+
+    @app.get("/next-steps/steps", response_class=HTMLResponse)
+    def next_steps_list(request: Request, goal: str = NEXT_STEP_GOALS[0], all: bool = False) -> HTMLResponse:
+        """The ranked steps, loaded by the Next Steps tab; measured in the background in live mode,
+        on demand otherwise."""
+        goal = goal if goal in NEXT_STEP_GOALS else NEXT_STEP_GOALS[0]
+        ranked, waiting, focus_count = _ranked_steps(goal)
         context = {
             "goal": goal,
             "all": all,
             "waiting": waiting,
-            "focus_count": len(adventures),
+            "focus_count": focus_count,
             "steps": ranked if all else ranked[:TOP_STEPS],
             "total": len(ranked),
         }
         return _TEMPLATES.TemplateResponse(request, "_next_steps.html", context)
+
+    @app.get("/next-steps/ready", response_class=HTMLResponse)
+    def ready_list(request: Request) -> HTMLResponse:
+        """Push's Ready to complete block, loaded by the Push tab (#36)."""
+
+        def verdict_for(adventure, patron):
+            return results.get(adventure, "Push", patron)[0].push_verdict
+
+        ready = ready_to_complete(catalogue, account, verdict_for)
+        return _TEMPLATES.TemplateResponse(request, "_ready.html", {"ready": ready})
 
     @app.get("/champions/{champion_id}", response_class=HTMLResponse)
     def champion_detail(request: Request, champion_id: int) -> HTMLResponse:
@@ -317,9 +340,32 @@ def create_app(
                 "spec_choices": catalogue.specializations.get(champion_id, ()),
                 "model_status": models.status(champion_id),
                 "model_evidence": _evidence(models, ledger, champion_id),
-                "explanation": models.explain(champion_id),
+                **_champion_usage_context(champion_id),  # how the advisor uses it (#37)
             },
         )
+
+    # --- champion page: how the advisor uses it (#37) ------------------------------------------
+
+    def _champion_usage_context(champion_id: int) -> dict:
+        explanation = models.explain(champion_id)
+        held = results.available()
+        return {
+            "explanation": explanation,
+            "seated": seated_in(champion_id, held, explanation),
+            "computed": sum(1 for rec, _ in held if rec.patron is None),
+            "computable": len(catalogue.adventures) * len(_RECOMMENDED_GOALS),
+            "step_goals": NEXT_STEP_GOALS,
+        }
+
+    @app.get("/champions/{champion_id}/next-steps", response_class=HTMLResponse)
+    def champion_next_steps(request: Request, champion_id: int, goal: str = NEXT_STEP_GOALS[0]) -> HTMLResponse:
+        """One Run Goal's Next Steps that involve this champion, loaded by its page."""
+        champion = catalogue.find(champion_id)
+        if champion is None or goal not in NEXT_STEP_GOALS:
+            raise HTTPException(404, "No such champion or Next Steps tab")
+        ranked, waiting, _ = _ranked_steps(goal)
+        context = {"champion": champion, "goal": goal, "waiting": waiting, "steps": champion_steps(champion_id, ranked)}
+        return _TEMPLATES.TemplateResponse(request, "_champion_steps.html", context)
 
     return app
 

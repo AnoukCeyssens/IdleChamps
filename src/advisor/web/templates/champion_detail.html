@@ -1,6 +1,10 @@
 {% extends "base.html" %}
 {% block title %}{{ champion.name }} · Idle Champions Advisor{% endblock %}
 {% block main %}
+{% macro effect_lines(lines) -%}
+{% for line in lines %}<p data-row="effect" class="effect {{ 'modelled' if line.modelled else 'assumption' if line.assumption else 'not-modelled' }}">{% if line.modelled %}With your gear: {{ line.modelled }}{% elif line.assumption %}Scoring Assumption: {{ line.assumption }}{% else %}{{ line.not_modelled }}{% endif %}</p>
+{% endfor %}
+{%- endmacro %}
 <style>
   .back a { color: var(--accent); text-decoration: none; }
   .summary.unowned, .muted { color: var(--muted); }
@@ -15,6 +19,8 @@
   section.detail li.chosen, section.detail li.equipped { border-left: 3px solid var(--accent); padding-left: 8px; }
   .game-text, li .muted { margin: 2px 0 0; font-size: 14px; color: var(--muted); font-style: italic; }
   .sep { display: none; }
+  p.effect { margin: 2px 0 0; font-size: 14px; }
+  p.effect.not-modelled { color: var(--muted); }
 </style>
 <p class="back"><a href="/champions">← Champions</a></p>
 <h1>{{ champion.name }}</h1>
@@ -33,23 +39,24 @@
   <p class="muted"><a href="/model-status">All Model Statuses and flags</a></p>
 </section>
 
+{% if explanation.lines or explanation.assumptions %}
 <section class="detail explanation">
   <h2>What the model counts</h2>
   <ul>
     {% for line in explanation.lines %}
     <li data-row="explanation">{{ line.text }}</li>
-    {% else %}
-    <li class="muted">No effects the model can score{{ " yet" if model_status.value == "Not Modelled" }}.</li>
     {% endfor %}
     {% for a in explanation.assumptions %}
-    <li data-row="explanation-assumption" class="muted">{{ a }}</li>
+    <li data-row="explanation-assumption" class="muted">Scoring Assumption: {{ a }}</li>
     {% endfor %}
   </ul>
 </section>
+{% endif %}
 
 {% if owned %}
 <section class="detail">
   <h2>Gear</h2>
+  <p class="muted" data-row="gear-scaling">{{ explanation.gear_scaling }}</p>
   <ul class="gear">
     {% for row in gear %}
     <li data-row="gear-slot" class="gear-slot {{ 'empty' if not row.owned }}">
@@ -59,6 +66,7 @@
       <span class="state">· {{ row.owned.rarity_name }}{% if row.owned.gild_name %} {{ row.owned.gild_name }}{% endif %} · Level {{ row.owned.level }}</span>
       {% if row.item %}<p class="game-text">{{ row.item.description }}</p>
       {% else %}<p class="muted">No item definition loaded for this slot.</p>{% endif %}
+      {{ effect_lines(explanation.gear.get(row.slot, ())) }}
       {% else %}
       <span class="state">· No gear</span>
       {% endif %}
@@ -78,6 +86,7 @@
       <span class="state">· {% if row.equipped %}Equipped{% elif row.owned %}Owned{% else %}Not owned{% endif %}</span>
       {% if row.feat %}<p class="game-text"><span class="sep"> · </span>{{ row.feat.description }}</p>
       {% else %}<p class="muted"><span class="sep"> · </span>No feat definition loaded.</p>{% endif %}
+      {{ effect_lines(explanation.feats.get(row.id, ())) }}
     </li>
     {% else %}
     <li class="muted">No feats {{ "owned" if owned else "known" }}.</li>
@@ -95,12 +104,34 @@
       <li data-row="spec-option" class="option {{ 'chosen' if chosen }}">
         <span class="name">{{ option.name }}</span>{% if chosen %}<span class="badge"> · Chosen</span>{% endif %}
         <p class="game-text"><span class="sep"> · </span>{{ option.description }}</p>
+        {{ effect_lines(explanation.specializations.get(option.id, ())) }}
       </li>
       {% endfor %}
     </ul>
   </div>
   {% else %}
   <p class="muted">No specialization definitions loaded for {{ champion.name }}.</p>
+  {% endfor %}
+</section>
+
+<section class="detail usage">
+  <h2>How the advisor uses {{ champion.name }}</h2>
+  <h3>Seated in</h3>
+  <p class="muted" data-row="seated-coverage">From the {{ computed }} of {{ computable }} adventure × Run Goal recommendations computed so far{% if computed < computable %} (open an adventure's tab to compute it){% endif %}.</p>
+  <ul class="seated">
+    {% for s in seated %}
+    <li data-row="seated" class="seated{{ ' stale' if s.stale }}">
+      <a href="/adventures/{{ s.adventure.id }}?goal={{ s.run_goal | urlencode }}{% if s.patron %}&patron={{ s.patron.id }}{% endif %}">{{ s.adventure.name }}{% if s.patron %} ({{ s.patron.name }}){% endif %}</a>
+      · {{ s.run_goal }} · Slot {{ s.slot }}{% if s.is_main_dps %} · Main DPS{% endif %}{% if s.contribution_label and not s.is_main_dps %} · {{ s.contribution_label }}{% endif %}{% if s.specializations %} · Specializations: {{ s.specializations | map(attribute="name") | join(", ") }}{% endif %}{% if s.feats %} · Feats: {{ s.feats | map(attribute="name") | join(", ") }}{% endif %}{% if s.lent %} · Lent by the adventure{% endif %}{% if s.stale %} · out of date{% endif %}
+      {% if s.reason %}<p class="muted" data-row="seated-reason">{{ s.reason }}</p>{% endif %}
+    </li>
+    {% else %}
+    <li class="muted" data-row="not-seated">No recommendation computed so far seats {{ champion.name }}.</li>
+    {% endfor %}
+  </ul>
+  <h3>Next Steps</h3>
+  {% for goal in step_goals %}
+  <div data-row="champion-steps-loading" hx-get="/champions/{{ champion.id }}/next-steps?goal={{ goal | urlencode }}" hx-trigger="load" hx-swap="outerHTML">{{ goal }}: measuring Next Steps…</div>
   {% endfor %}
 </section>
 {% endblock %}

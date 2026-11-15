@@ -138,6 +138,44 @@ def same_area_set_to_load(catalogue: Catalogue, account: Account, adventure: Adv
     return next((a for a in sharing if is_unlocked(catalogue, account, a)), None)
 
 
+def is_done(account: Account, adventure: Adventure) -> bool:
+    """Its objective is completed (as far as the Player Snapshot shows)."""
+    return _is_done(account, adventure)
+
+
+def patron_completion(account: Account, adventure: Adventure, patron_id: int) -> bool | None:
+    """Whether `adventure`'s objective under `patron_id` is completed, None when the snapshot can't
+    tell. `completed_patron_adventure_ids` (per campaign) has an unverified element shape (#9): only
+    shapes naming both the patron and the adventure are read, `{patron id: [adventure id, ...]}` and
+    `[{"patron_id": ..., "adventure_id": ...}, ...]`. Anything else (bare ids, strings, other
+    nesting) is unknown, never an error."""
+    sent = account.completed_patron_adventures.get(adventure.campaign_id)
+    try:
+        if isinstance(sent, dict):
+            ids = sent.get(str(patron_id), sent.get(patron_id))
+            if isinstance(ids, list) and all(_is_int(i) for i in ids):
+                return adventure.id in {int(i) for i in ids}
+            return None
+        if isinstance(sent, list) and sent and all(isinstance(e, dict) for e in sent):
+            pairs = {
+                (int(e["patron_id"]), int(e["adventure_id"])) for e in sent if "patron_id" in e and "adventure_id" in e
+            }
+            return (patron_id, adventure.id) in pairs if len(pairs) == len(sent) else None
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _is_int(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _is_done(account: Account, adventure: Adventure) -> bool:
     best = account.best_areas.get(adventure.id)
     return adventure.id in account.completed_adventure_ids or (

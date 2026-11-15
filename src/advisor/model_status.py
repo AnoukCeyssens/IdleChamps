@@ -35,7 +35,7 @@ from typing import Any
 from advisor.account import Account
 from advisor.catalogue import Catalogue, Champion
 from advisor.champion_models import RECONSTRUCTIONS, ChampionModels, ModelStatus
-from advisor.push_verdict import formation_in_play
+from advisor.push_verdict import formation_in_play, instance_estimate
 
 MODEL_STATUS_VERSION = 1
 TOLERANCE_PCT = 2.0  # fixed: a mismatch from rounding or caps is a failure, never a reason to widen it
@@ -136,7 +136,64 @@ def damage_checks(catalogue: Catalogue, account: Account, models: ChampionModels
     return tuple(checks)
 
 
-def advance(ledger: Ledger, catalogue: Catalogue, account: Account, checks: tuple[DamageCheck, ...]) -> Ledger:
+def community_flags(recommendations) -> tuple[ReviewFlag, ...]:
+    """Model review flags for community Gem Farm formations scoring more than 10% below the
+    recommendation (#39), one per formation, from the recommendations computed so far."""
+    gaps: dict[str, list] = {}
+    for rec in recommendations:
+        for c in getattr(rec, "comparisons", ()):
+            if c.raises_model_review:
+                gaps.setdefault(c.name, []).append((c, rec.adventure.name))
+    flags = []
+    for name, found in gaps.items():
+        worst, where = max(found, key=lambda pair: pair[0].pct_weaker)
+        others = len({a for _, a in found}) - 1
+        why = "; ".join(worst.top_effects)
+        flags.append(ReviewFlag(
+            f"Community Gem Farm formation “{name}” scores {worst.pct_weaker:.0f}% below the recommendation on "
+            f"{where}{f' (and {others} more adventure' + ('s' if others != 1 else '') + ')' if others else ''}"
+            f"{f': {why}' if why else ''}. The model may be missing what makes it work.",
+            (),
+        ))
+    return tuple(sorted(flags, key=lambda f: f.text))
+
+
+@dataclass(frozen=True)
+class CalibrationFlag:
+    """A Push calibration flag: a live run went further than its Push estimate allows."""
+
+    instance_id: int
+    adventure_name: str
+    text: str
+
+
+def push_calibration(catalogue: Catalogue, account: Account, models: ChampionModels) -> tuple[CalibrationFlag, ...]:
+    """Push calibration flags (#39): for each live run, the Push estimate for its formation in play
+    against the highest area that run reached. Raised when it beats the estimate by more than the
+    band width, or passes a boss the breaking check said it can't break in time."""
+    flags = []
+    for instance in account.instances:
+        estimate = instance_estimate(catalogue, account, models, instance)
+        if estimate is None or estimate.area is None:
+            continue
+        adventure = catalogue.adventure(instance.adventure_id)
+        name = adventure.name if adventure else f"Adventure {instance.adventure_id}"
+        reached = max(instance.highest_area, instance.current_area)
+        where = f"Instance {instance.id} on {name} reached area {reached}"
+        if estimate.band is not None and reached - estimate.area > estimate.band:
+            flags.append(CalibrationFlag(instance.id, name, (
+                f"{where}: beyond the Push estimate for its formation (area {estimate.area} ± {estimate.band}) by "
+                f"{reached - estimate.area} areas, more than the band width."
+            )))
+        if estimate.unbroken_boss is not None and reached > estimate.unbroken_boss:
+            flags.append(CalibrationFlag(instance.id, name, (
+                f"{where}: it passed the boss at area {estimate.unbroken_boss}, which the model said its formation "
+                "can't break in time."
+            )))
+    return tuple(flags)
+
+
+def advance(ledger: Ledger,catalogue: Catalogue, account: Account, checks: tuple[DamageCheck, ...]) -> Ledger:
     """The ledger after one Refresh: Stale transitions first, then the damage checks not yet counted."""
     at = account.server_time
     records = dict(ledger.records)

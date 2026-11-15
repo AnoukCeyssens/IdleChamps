@@ -12,6 +12,10 @@ pins or unpins one, it is the default for the snapshot:
   reset on and a reset area set); with none, the last-played adventure.
 - Gold Farm: per campaign whose Favor the player has earned, the adventures its instances are on;
   with none there, the adventure the player got furthest in.
+- Push: per campaign the player is progressing, the furthest unfinished adventure they can start.
+
+The Push tab opens with Ready to complete (`ready_to_complete`): objectives the Push Verdict now
+calls Likely that the player hasn't completed and can start now.
 
 Measuring a Gem Farm adventure takes seconds (every change is re-searched), so in live mode the
 Focus Set's adventures are measured in a background pool after each Refresh that changes the
@@ -23,19 +27,21 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor, Future
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from advisor.account import RARITY_NAMES, Account, parse_account
-from advisor.catalogue import Adventure, Catalogue, parse_catalogue
-from advisor.champion_models import ChampionModels
-from advisor.explorer import is_running
+from advisor.catalogue import Adventure, Catalogue, Patron, parse_catalogue
+from advisor.champion_models import ChampionModels, ModelStatus
+from advisor.explorer import is_done, is_running, is_unlocked, patron_completion, tree
 from advisor.hints import CONTRACT_LEVELS, MIN_GAIN_PCT, MODRON_LEVEL_EXP, Change, Hint, candidate_changes, measure
+from advisor.push_verdict import PushVerdict
+from advisor.recompute import _area_sets_key, _statuses_key
 from advisor.recommendation import FormationRecommendation, recommend, with_search_problem
 from advisor.request_log import RawResponses
 from advisor.store import Store
 
-# Run Goals with a Next Steps tab (Push gets its own with Ready to complete).
-NEXT_STEP_GOALS = ("Gem Farm", "Gold Farm")
+# Run Goals with a Next Steps tab (Push's opens with Ready to complete, #36).
+NEXT_STEP_GOALS = ("Push", "Gem Farm", "Gold Farm")
 # Steps shown before "show all".
 TOP_STEPS = 10
 
@@ -71,7 +77,26 @@ def default_focus(catalogue: Catalogue, account: Account, goal: str) -> tuple[in
                 here = [max(mine, key=lambda a: account.best_areas.get(a.id, 0)).id]
             ids.extend(here)
         return tuple(dict.fromkeys(ids))
+    if goal == "Push":
+        return _default_push_focus(catalogue, account)
     return ()
+
+
+def _default_push_focus(catalogue: Catalogue, account: Account) -> tuple[int, ...]:
+    """Per campaign I'm progressing (one I can play with an adventure done or run), the furthest
+    unfinished adventure I can start: the one with the highest best area, else the first in order."""
+    ids = []
+    for node in tree(catalogue, account):
+        mine = [a for a in catalogue.adventures if a.campaign_id == node.campaign.id]
+        if not node.running or not any(account.best_areas.get(a.id) or is_done(account, a) for a in mine):
+            continue
+        open_ = [
+            a for a in mine
+            if a.objective_area is not None and not is_done(account, a) and is_unlocked(catalogue, account, a)
+        ]
+        if open_:
+            ids.append(max(open_, key=lambda a: account.best_areas.get(a.id, 0)).id)  # ties: the first
+    return tuple(ids)
 
 
 class FocusSets:
@@ -104,6 +129,80 @@ class FocusSets:
                 self._store.save_focus(saved)
             except OSError:
                 pass  # kept in memory
+
+
+# --- Ready to complete (Push) ------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReadyToComplete:
+    adventure: Adventure
+    patron: Patron | None  # a patron objective
+    verdict: PushVerdict
+    unlocks: tuple[str, ...]  # what completing it unlocks, e.g. "patron Mirt", "variant Skittering Skulls"
+
+
+def ready_to_complete(
+    catalogue: Catalogue, account: Account, verdict_for: Callable[[Adventure, int | None], PushVerdict | None]
+) -> tuple[ReadyToComplete, ...]:
+    """Objectives whose Push Verdict is now Likely and that I haven't completed, on adventures I
+    can start now (an event's only while it runs). Patron objectives count for unlocked patrons; a
+    patron completion the snapshot can't read counts as not completed (here only). Ordered by what
+    completing unlocks (a patron, then a variant, then an event champion), then campaign order.
+    `verdict_for(adventure, patron)` gives the shown Push recommendation's verdict."""
+    order = {
+        a.id: (i, j)
+        for i, node in enumerate(tree(catalogue, account))
+        for j, a in enumerate(a for a in catalogue.adventures if a.campaign_id == node.campaign.id)
+    }
+    found = []
+    for adventure in catalogue.adventures:
+        if adventure.id not in order or not is_unlocked(catalogue, account, adventure):
+            continue
+        objectives: list[int | None] = []
+        if adventure.objective_area is not None and not is_done(account, adventure):
+            objectives.append(None)
+        objectives += [
+            p for p in adventure.patron_objectives
+            if p in account.unlocked_patron_ids and patron_completion(account, adventure, p) is not True
+        ]
+        for patron in objectives:
+            verdict = verdict_for(adventure, patron)
+            if verdict is None or verdict.kind != "likely":
+                continue
+            unlocks = _unlocks(catalogue, account, adventure) if patron is None else ()
+            found.append(ReadyToComplete(adventure, catalogue.patron(patron) if patron else None, verdict, unlocks))
+
+    def rank(entry: ReadyToComplete) -> tuple:
+        kinds = {u.split(" ", 1)[0] for u in entry.unlocks}
+        return (*(k not in kinds for k in ("patron", "variant", "champion")), order[entry.adventure.id],
+                entry.patron is not None, entry.patron.id if entry.patron else 0)
+
+    return tuple(sorted(found, key=rank))
+
+
+def _unlocks(catalogue: Catalogue, account: Account, adventure: Adventure) -> tuple[str, ...]:
+    """What completing `adventure`'s objective unlocks that I don't have yet."""
+    def needs_it(requirements) -> bool:
+        return any(
+            isinstance(r, dict) and r.get("condition") == "adventure_complete"
+            and str(r.get("adventure_id")) == str(adventure.id)
+            for r in requirements
+        )
+
+    patrons = [
+        f"patron {p.name}" for p in catalogue.patrons.values()
+        if p.id not in account.unlocked_patron_ids and needs_it(p.requirements)
+    ]
+    variants = [
+        f"variant {v.name}" for v in catalogue.adventures
+        if v.is_variant and v.id != adventure.id and needs_it(v.requirements) and not is_done(account, v)
+        and not account.best_areas.get(v.id)
+    ]
+    champion = []
+    if adventure.champion_id and not adventure.is_variant and adventure.champion_id not in account.champions:
+        champion = [f"champion {catalogue.champion(adventure.champion_id).name}"]
+    return (*patrons, *variants, *champion)
 
 
 # --- Steps -------------------------------------------------------------------------------------
@@ -254,15 +353,25 @@ class Steps:
         self._key: tuple | None = None
         self._run = 0
         self._raw: RawResponses | None = None
+        self._worker_args: tuple = (None, {})  # the Area Set Cache and Model Statuses, for workers
         self._measured: dict[StepKey, tuple[Hint, ...]] = {}
         self._pending: set[StepKey] = set()
         self._pool: Executor | None = None
 
-    def update(self, raw: RawResponses, account: Account) -> None:
-        """New data loaded: drop everything measured on other data (and cancel its jobs)."""
+    def update(
+        self, raw: RawResponses, account: Account, catalogue: Catalogue | None = None,
+        models: ChampionModels | None = None,
+    ) -> None:
+        """New data loaded: drop everything measured on other data (and cancel its jobs). Workers
+        get `catalogue`'s Area Set Cache (Push verdicts and breaking) and `models`' Model Statuses,
+        and both are part of the key, as in the Recompute."""
         key = (account.recommendation_key, str(raw["getdefinitions"].get("checksum")))
+        area_sets = dict(catalogue.area_sets) if catalogue is not None else None
+        statuses = {k: v.value for k, v in models.statuses.items()} if models is not None else {}
+        key += (_area_sets_key(catalogue) if catalogue is not None else "", _statuses_key(models) if models else "")
         with self._lock:
             self._raw = raw
+            self._worker_args = (area_sets, statuses)
             if key == self._key:
                 return
             self._key = key
@@ -302,7 +411,7 @@ class Steps:
             self._pending.update(missing)
             run, raw = self._run, self._raw
             if self._pool is None:
-                self._pool = self._executor_factory(_init_worker, (dict(raw),))
+                self._pool = self._executor_factory(_init_worker, (dict(raw), *self._worker_args))
             pool = self._pool
         for adventure_id, goal in missing:
             pool.submit(_measure_job, adventure_id, goal).add_done_callback(
@@ -340,10 +449,14 @@ class Steps:
 _WORKER: tuple[Catalogue, Account, ChampionModels] | None = None
 
 
-def _init_worker(raw: RawResponses) -> None:
+def _init_worker(raw: RawResponses, area_sets: dict | None = None, statuses: dict | None = None) -> None:
+    """Like the Recompute's workers: the app's Area Set Cache and Model Statuses over the snapshot."""
     global _WORKER
     catalogue, account = parse_catalogue(raw), parse_account(raw)
-    _WORKER = (catalogue, account, ChampionModels(catalogue, account))
+    if area_sets is not None:
+        catalogue = replace(catalogue, area_sets=area_sets)
+    models = ChampionModels(catalogue, account, statuses={k: ModelStatus(v) for k, v in (statuses or {}).items()})
+    _WORKER = (catalogue, account, models)
 
 
 def _measure_job(adventure_id: int, goal: str) -> tuple[Hint, ...]:

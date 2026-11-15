@@ -1,0 +1,14 @@
+<div id="ready">
+  <ol class="ready">
+    {% for r in ready %}
+    {% set query = "goal=Push" ~ ("&patron=" ~ r.patron.id if r.patron else "") %}
+    <li data-row="ready">
+      <a data-row="ready-adventure" href="/adventures/{{ r.adventure.id }}?{{ query }}">{{ r.adventure.name }}{% if r.patron %} ({{ r.patron.name }}){% endif %}</a>
+      <span data-row="ready-verdict">Likely: ~{{ r.verdict.expected_area }} (±{{ r.verdict.band }}) · objective {{ r.verdict.objective }}</span>
+      {% if r.unlocks %}<span class="unlocks" data-row="ready-unlocks">Unlocks {{ r.unlocks | join(", ") }}</span>{% endif %}
+    </li>
+    {% else %}
+    <li data-row="ready-none">Nothing you can start now is Likely to be completed yet.</li>
+    {% endfor %}
+  </ol>
+</div>

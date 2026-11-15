@@ -59,6 +59,19 @@ class ModronSave:
 
 
 @dataclass(frozen=True)
+class SavedFormation:
+    """One in-game formation save (`formation_saves_v2[]`; the game sends only the current
+    formation-save campaign's): champion id per slot (-1 empty), with its specializations and feats."""
+
+    id: int
+    campaign_id: int  # the formation-save campaign (an adventure's `formation_saves_campaign_id`, else its campaign)
+    name: str
+    formation: tuple[int, ...]
+    specializations: Mapping[int, tuple[int, ...]] = field(default_factory=dict)  # champion id -> upgrade ids
+    feats: Mapping[int, tuple[int, ...]] = field(default_factory=dict)  # champion id -> feat ids
+
+
+@dataclass(frozen=True)
 class GameInstance:
     """One live run (`game_instances[]`): where it is, the formation in play, and its BUD."""
 
@@ -91,6 +104,8 @@ class Account:
     favor_earned: Mapping[int, float] = field(default_factory=dict)  # reset currency id -> total earned
     buff_inventory: Mapping[int, int] = field(default_factory=dict)  # buff id (contracts, potions) -> owned
     chests: Mapping[int, int] = field(default_factory=dict)  # chest type id -> unopened
+    # Seed the search and are compared with the recommendation (#39), so part of `owned_state()`.
+    saved_formations: tuple[SavedFormation, ...] = ()
 
     def owns(self, champion_id: int) -> bool:
         return champion_id in self.champions
@@ -123,6 +138,14 @@ class Account:
             "unlocked_patron_ids": sorted(self.unlocked_patron_ids),
             "event_tiers": {str(k): v for k, v in sorted(self.event_tiers.items())},
             "best_areas": {str(k): v for k, v in sorted(self.best_areas.items())},
+            "saved_formations": [
+                {
+                    "id": f.id, "campaign_id": f.campaign_id, "name": f.name, "formation": list(f.formation),
+                    "specializations": {str(k): list(v) for k, v in sorted(f.specializations.items())},
+                    "feats": {str(k): list(v) for k, v in sorted(f.feats.items())},
+                }
+                for f in self.saved_formations
+            ],
         }
 
     @property
@@ -187,7 +210,33 @@ def parse_account(raw: RawResponses) -> Account:
             if isinstance(b, dict) and b.get("buff_id") is not None
         },
         chests={int(k): int(v or 0) for k, v in _entries(details.get("chests")) if str(k).isdigit()},
+        saved_formations=tuple(
+            f for f in map(_saved_formation, details.get("formation_saves_v2") or ()) if f is not None
+        ),
     )
+
+
+def _saved_formation(save) -> SavedFormation | None:
+    if not isinstance(save, dict):
+        return None
+
+    def by_champion(value) -> dict[int, tuple[int, ...]]:
+        return {
+            int(k): tuple(int(i) for i in v if int(i) > 0)
+            for k, v in _entries(value) if str(k).isdigit() and isinstance(v, list)
+        }
+
+    try:
+        return SavedFormation(
+            id=int(save["formation_save_id"]),
+            campaign_id=int(save["campaign_id"]),
+            name=str(save.get("name") or f"Formation {save['formation_save_id']}"),
+            formation=tuple(int(c) for c in save.get("formation") or ()),
+            specializations=by_champion(save.get("specializations")),
+            feats=by_champion(save.get("feats")),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _keys(value) -> list:
