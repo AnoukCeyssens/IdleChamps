@@ -360,6 +360,11 @@ def _obtainable(catalogue: Catalogue, account: Account, champion_id: int) -> boo
 StepKey = tuple[int, str]  # (adventure id, Run Goal)
 
 
+# Measuring is slow (a search per candidate change): it runs after the Recompute's adventure jobs,
+# which share the pool (`background.Workers`).
+STEPS_PRIORITY = 1
+
+
 class Steps:
     """Each Focus adventure's measured one-changes per Run Goal (potions included: the Formation
     view's hints reuse them), for the current data. With background `workers` (live mode) missing
@@ -418,6 +423,7 @@ class Steps:
             self._workers.submit(
                 lambda future, k=(adventure_id, goal), run=run: self._collect(run, k, future),
                 measure_job, adventure_id, goal,
+                priority=STEPS_PRIORITY,
             )
 
     def close(self) -> None:

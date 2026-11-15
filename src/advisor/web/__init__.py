@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from advisor.background import ExecutorFactory, Workers, process_pool
+from advisor.background import WORKER_COUNT, ExecutorFactory, Workers, process_pool
 from advisor.catalogue import GEAR_SLOTS, ROLE_TAGS
 from advisor.champion_models import ModelStatus
 from advisor.explorer import RUN_GOALS, adventure_node, is_running, tree
@@ -285,7 +285,8 @@ def create_live_app(
     store = Store(data_dir)
     refresher = Refresher(client, store, cooldown=config.cooldown_seconds, clock=clock or time.time, **options)
     refresher.on_refresh(lambda responses: write_history(store, responses))
-    workers = Workers(executor, drain=background)  # tests drain synchronously, like their Refresh
+    # Fed one job per worker, the Recompute's before Next Steps'; tests drain synchronously, like their Refresh.
+    workers = Workers(executor, drain=background, slots=WORKER_COUNT if executor is process_pool else None)
     return create_app(
         live=refresher,
         recompute=Recompute(RECOMMENDED_GOALS, store=store, workers=workers),

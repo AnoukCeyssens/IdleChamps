@@ -10,6 +10,8 @@ never waits: a Refresh returns at once even when a job takes minutes.
 from __future__ import annotations
 
 import hashlib
+import heapq
+import itertools
 import json
 import os
 import threading
@@ -27,8 +29,11 @@ from advisor.request_log import RawResponses
 ExecutorFactory = Callable[[Callable, tuple], Executor]  # (worker initializer, its args) -> pool
 
 
+WORKER_COUNT = max(1, (os.cpu_count() or 2) - 1)
+
+
 def process_pool(initializer: Callable, initargs: tuple) -> Executor:
-    return ProcessPoolExecutor(max_workers=max(1, (os.cpu_count() or 2) - 1), initializer=initializer, initargs=initargs)
+    return ProcessPoolExecutor(max_workers=WORKER_COUNT, initializer=initializer, initargs=initargs)
 
 
 def _code_fingerprint() -> str:
@@ -94,23 +99,31 @@ class DataKey:
 
 class Workers:
     """The one background pool (live mode; `executor=None` means no background work). It starts on
-    the first job and shuts down once idle. `use` with new data cancels pending jobs and returns at
-    once; the old pool drains in the background (`drain`), and jobs on the new data queue until it
-    has, so pools never overlap."""
+    the first job and shuts down once idle. Jobs wait here and are fed to the pool at most `slots`
+    at a time (None: all at once), lowest `priority` first, so slow low-priority jobs queued early
+    can't hold every worker. `use` with new data cancels waiting jobs and returns at once; the old
+    pool drains in the background (`drain`), and jobs on the new data wait until it has, so pools
+    never overlap."""
 
     def __init__(
-        self, executor: ExecutorFactory | None = None, *, drain: Callable[[Callable[[], None]], None] | None = None
+        self,
+        executor: ExecutorFactory | None = None,
+        *,
+        drain: Callable[[Callable[[], None]], None] | None = None,
+        slots: int | None = None,
     ) -> None:
         self._factory = executor
         self._drain_in = drain or _in_thread
+        self._slots = slots
         self._draining = False
-        self._queued: list[tuple[Callable[[Future], None], Callable, tuple]] = []
+        self._waiting: list[tuple[int, int, Callable[[Future], None], Callable, tuple]] = []  # a heap
+        self._order = itertools.count()
         self._lock = threading.Lock()
         self._use_lock = threading.Lock()
         self._key: DataKey | None = None
         self._data: WorkerData | None = None
         self._pool: Executor | None = None
-        self._outstanding = 0
+        self._running = 0  # jobs handed to the current pool and not yet done
 
     @property
     def enabled(self) -> bool:
@@ -122,11 +135,11 @@ class Workers:
                 if key == self._key:
                     return
                 self._key, self._data = key, data
-                pool, self._pool, self._outstanding = self._pool, None, 0
-                superseded, self._queued = self._queued, []
+                pool, self._pool, self._running = self._pool, None, 0
+                superseded, self._waiting = self._waiting, []
                 if pool is not None:
                     self._draining = True
-            for on_done, _, _ in superseded:  # queued for data that never got a pool
+            for _, _, on_done, _, _ in superseded:  # waiting on data that is now out of date
                 cancelled: Future = Future()
                 cancelled.cancel()
                 on_done(cancelled)
@@ -134,37 +147,46 @@ class Workers:
                 self._drain_in(lambda: self._drain(pool))
 
     def _drain(self, pool: Executor) -> None:
-        """Wait out the old data's running jobs (pending ones are cancelled), then start the queued
-        jobs on the current data."""
+        """Wait out the old data's running jobs (pending ones are cancelled), then start the jobs
+        waiting on the current data."""
         try:
             pool.shutdown(wait=True, cancel_futures=True)
         finally:
             with self._lock:
                 self._draining = False
-                queued, self._queued = self._queued, []
-            for on_done, fn, args in queued:
-                self.submit(on_done, fn, *args)
+            self._dispatch()
 
-    def submit(self, on_done: Callable[[Future], None], fn: Callable, *args) -> None:
+    def submit(self, on_done: Callable[[Future], None], fn: Callable, *args, priority: int = 0) -> None:
         """Run `fn(*args)` in a worker on the current data; `on_done(future)` when it ends (also
-        when cancelled by a data change)."""
+        when cancelled by a data change). Lower `priority` runs first."""
         with self._lock:
             if self._factory is None or self._data is None:
                 return
-            if self._draining:  # the old data's pool is still finishing its running jobs
-                self._queued.append((on_done, fn, args))
-                return
-            if self._pool is None:
-                self._pool = self._factory(_init_worker, (self._data,))
-            pool = self._pool
-            self._outstanding += 1
-            future = pool.submit(fn, *args)
-        future.add_done_callback(lambda f: self._done(pool, f, on_done))
+            heapq.heappush(self._waiting, (priority, next(self._order), on_done, fn, args))
+        self._dispatch()
+
+    def _dispatch(self) -> None:
+        """Hand waiting jobs to the pool while it has free slots."""
+        started = []
+        with self._lock:
+            while (
+                self._waiting
+                and not self._draining
+                and self._data is not None
+                and (self._slots is None or self._running < self._slots)
+            ):
+                _, _, on_done, fn, args = heapq.heappop(self._waiting)
+                if self._pool is None:
+                    self._pool = self._factory(_init_worker, (self._data,))
+                self._running += 1
+                started.append((self._pool, self._pool.submit(fn, *args), on_done))
+        for pool, future, on_done in started:
+            future.add_done_callback(lambda f, pool=pool, on_done=on_done: self._done(pool, f, on_done))
 
     def close(self) -> None:
         with self._lock:
             pool, self._pool, self._key = self._pool, None, None
-            self._queued = []
+            self._waiting = []
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
 
@@ -175,11 +197,13 @@ class Workers:
             idle = False
             with self._lock:
                 if pool is self._pool:
-                    self._outstanding -= 1
-                    if self._outstanding <= 0:
+                    self._running -= 1
+                    if self._running <= 0 and not self._waiting:
                         self._pool, idle = None, True
             if idle:
                 pool.shutdown(wait=False)
+            else:
+                self._dispatch()
 
 
 def _in_thread(job: Callable[[], None]) -> None:

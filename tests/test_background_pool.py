@@ -70,3 +70,45 @@ def test_jobs_queued_for_superseded_data_are_cancelled():
 
     assert [f.cancelled() for f in done] == [True]
     release.set()
+
+
+class CountingPool:
+    """Records submitted jobs; the test completes them."""
+
+    def __init__(self, opened: list) -> None:
+        self.submitted: list[tuple[str, Future]] = []
+        opened.append(self)
+
+    def submit(self, fn, *args) -> Future:
+        future = Future()
+        self.submitted.append((args[0], future))
+        return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        pass
+
+
+def _finish(pool: CountingPool, name: str) -> None:
+    future = next(f for n, f in pool.submitted if n == name)
+    future.set_running_or_notify_cancel()
+    future.set_result(None)
+
+
+def test_with_limited_workers_urgent_jobs_run_before_earlier_queued_background_ones():
+    """Next Steps' slow measuring jobs (queued first, at app start) must not hold every worker while
+    the Recompute's adventures wait."""
+    opened: list[CountingPool] = []
+    workers = Workers(lambda init, args: CountingPool(opened), slots=2)
+    workers.use(_key(1), data=object())
+    for n in range(3):
+        workers.submit(lambda f: None, str, f"steps {n}", priority=1)
+    for n in range(3):
+        workers.submit(lambda f: None, str, f"adventure {n}")  # priority 0: first
+
+    [pool] = opened
+    assert [n for n, _ in pool.submitted] == ["steps 0", "steps 1"]  # only 2 at a time
+    _finish(pool, "steps 0")
+    assert [n for n, _ in pool.submitted][2:] == ["adventure 0"]
+    _finish(pool, "steps 1")
+    _finish(pool, "adventure 0")
+    assert [n for n, _ in pool.submitted][3:] == ["adventure 1", "adventure 2"]
