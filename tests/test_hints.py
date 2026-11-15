@@ -168,9 +168,10 @@ def test_pruning_never_drops_a_change_with_a_positive_gain(hinted, roster, run_g
         assert found[action] == pytest.approx(gain, rel=1e-6)
 
 
-def test_a_persisted_result_drops_its_search_problem_and_hints_rebuild_it(hinted):
+@pytest.mark.parametrize("goal", ["Gem Farm", "Gold Farm", "Push"])
+def test_a_persisted_result_drops_its_search_problem_and_hints_rebuild_it(hinted, goal):
     catalogue, account = hinted
-    rec = recommend(catalogue, account, catalogue.adventure(7), "Gold Farm")
+    rec = recommend(catalogue, account, catalogue.adventure(7), goal)
     assert pickle.loads(pickle.dumps(rec)).problem == rec.problem  # crosses the recompute pool intact
 
     encoded = Encoder(catalogue)(rec)

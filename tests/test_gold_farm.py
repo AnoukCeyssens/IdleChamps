@@ -145,8 +145,9 @@ def test_no_legal_formation_shows_the_missing_piece(tmp_path_factory):
     assert rows(page, "main-dps") == []
 
 
-def test_other_run_goals_do_not_show_a_recommendation_yet(client):
-    assert rows(client.get("/adventures/7?goal=Gem%20Farm").text, "main-dps") == []
+def test_every_run_goal_tab_shows_a_recommendation(client):
+    for goal in ("Push", "Gem%20Farm", "Gold%20Farm"):
+        assert len(rows(client.get(f"/adventures/7?goal={goal}").text, "main-dps")) == 1, goal
 
 
 # --- "What would make this better" hints (#34) -----------------------------------------------

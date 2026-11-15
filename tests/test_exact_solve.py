@@ -18,7 +18,7 @@ from advisor.recommendation import recommend
 from test_recommendation import DIAMOND, LINE, _small_roster, modelled, raw  # noqa: F401  (fixtures)
 
 
-@pytest.mark.parametrize("run_goal", ["Gold Farm", "Push"])
+@pytest.mark.parametrize("run_goal", ["Gold Farm", "Push", "Gem Farm"])
 @pytest.mark.parametrize(
     "adventure_id, layout, roster",
     [

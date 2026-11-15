@@ -250,7 +250,7 @@ def _small_roster(account, ids):
     return replace(account, champions={i: c for i, c in account.champions.items() if i in ids})
 
 
-@pytest.mark.parametrize("run_goal", ["Gold Farm", "Push"])
+@pytest.mark.parametrize("run_goal", ["Gold Farm", "Push", "Gem Farm"])
 @pytest.mark.parametrize(
     "adventure_id, layout, roster",
     [
@@ -263,7 +263,8 @@ def _small_roster(account, ids):
 )
 def test_fast_search_matches_an_exhaustive_solve_within_its_gap(modelled, adventure_id, layout, roster, run_goal):
     catalogue, account = modelled
-    account = _small_roster(account, roster)
+    # The recording's 3 familiars, and a second (less experienced) modron core to choose between.
+    account = replace(_small_roster(account, roster), modron_cores={1: 1941, 2: 300})
     adventure = replace(catalogue.adventure(adventure_id), layout=layout, blocked_slots=frozenset())
 
     fast = recommend(catalogue, account, adventure, run_goal)
@@ -272,3 +273,9 @@ def test_fast_search_matches_an_exhaustive_solve_within_its_gap(modelled, advent
     assert exact.exact and not fast.exact
     assert fast.score <= exact.score * (1 + 1e-9)
     assert fast.score * (1 + fast.gap_pct / 100) >= exact.score * (1 - 1e-9)
+    for rec in (fast, exact):  # every familiar placed, at most one per slot, only on seated champions
+        assert sorted(f.familiar_id for f in rec.familiars) == [1, 113, 119]
+        seated = {s.slot for s in rec.seats if s.champion is not None}
+        on_field = [f.slot for f in rec.familiars if f.slot is not None]
+        assert len(set(on_field)) == len(on_field) and set(on_field) <= seated
+        assert rec.modron.core_id in (1, 2)

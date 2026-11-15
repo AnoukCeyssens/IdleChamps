@@ -46,6 +46,16 @@ class OwnedChampion:
 
 
 @dataclass(frozen=True)
+class ModronSave:
+    """One modron core as saved: its node grid (rows of tile ids, 0 = empty) and its reset area."""
+
+    core_id: int
+    experience: int
+    grid: tuple[tuple[int, ...], ...] = ()
+    area_goal: int | None = None
+
+
+@dataclass(frozen=True)
 class GameInstance:
     """One live run (`game_instances[]`): where it is, the formation in play, and its BUD."""
 
@@ -70,6 +80,7 @@ class Account:
     familiar_ids: frozenset[int] = frozenset()  # familiars owned
     modron_cores: Mapping[int, int] = field(default_factory=dict)  # core id -> experience (its level)
     completed_patron_adventures: Mapping[int, object] = field(default_factory=dict)  # campaign id -> as sent
+    modron_saves: Mapping[int, ModronSave] = field(default_factory=dict)  # core id -> saved setup
     server_time: int | None = None  # the snapshot's server clock (Unix seconds), `getuserdetails.current_time`
     instances: tuple[GameInstance, ...] = ()  # live runs; not part of `owned_state()`
 
@@ -78,7 +89,7 @@ class Account:
 
     def owned_state(self) -> dict:
         """The recommendation-relevant subset of the account, as plain JSON-ready data: owned
-        champions and levels, gear, feats, specializations, familiars, modron cores, adventure /
+        champions and levels, gear, feats, specializations, familiars, modron cores and their saved setups, adventure /
         variant / patron completion and `highest_area` stats. Currencies are left out on purpose."""
         return {
             "champions": {
@@ -94,6 +105,11 @@ class Account:
             },
             "familiars": sorted(self.familiar_ids),
             "modron_cores": {str(k): v for k, v in sorted(self.modron_cores.items())},
+            # The saved node layout and reset area shape the Gem Farm result (#29).
+            "modron_saves": {
+                str(k): {"grid": [list(row) for row in s.grid], "area_goal": s.area_goal}
+                for k, s in sorted(self.modron_saves.items())
+            },
             "completed_adventure_ids": sorted(self.completed_adventure_ids),
             "completed_patron_adventures": {str(k): v for k, v in sorted(self.completed_patron_adventures.items())},
             "unlocked_patron_ids": sorted(self.unlocked_patron_ids),
@@ -139,6 +155,11 @@ def parse_account(raw: RawResponses) -> Account:
             for key, core in _entries(details.get("modron_saves"))
             if isinstance(core, dict)
         },
+        modron_saves={
+            save.core_id: save
+            for key, core in _entries(details.get("modron_saves"))
+            if isinstance(core, dict) and (save := _modron_save(key, core))
+        },
         completed_patron_adventures={
             int(c["campaign_id"]): c["completed_patron_adventure_ids"]
             for c in (raw.get("getcampaigndetails") or {}).get("campaigns") or ()
@@ -146,6 +167,17 @@ def parse_account(raw: RawResponses) -> Account:
         },
         server_time=int(raw["getuserdetails"]["current_time"]) if raw["getuserdetails"].get("current_time") else None,
         instances=tuple(i for i in map(_instance, details.get("game_instances") or ()) if i),
+    )
+
+
+def _modron_save(key, core: Mapping) -> ModronSave:
+    grid = tuple(tuple(int(t or 0) for t in row) for row in core.get("grid") or () if isinstance(row, list))
+    goal = str(core.get("area_goal") or "").strip()
+    return ModronSave(
+        core_id=int(core.get("core_id") or key),
+        experience=int(float(core.get("exp_total") or 0)),
+        grid=grid,
+        area_goal=int(goal) if goal.isdigit() and int(goal) > 0 else None,
     )
 
 
