@@ -156,6 +156,7 @@ class Live:
         self.log = write_request_log(tmp_path / "webRequestLog.txt")
         self.data_dir.mkdir()
         self.pools: list[ManualPool] = []
+        self.step_pools: list[ManualPool] = []  # Next Steps' measuring pools; jobs run on `run()` too
         (self.data_dir / "config.toml").write_text(f'request_log = "{self.log}"\n')
 
     def app(self, background=lambda job: job(), pools: list | None = None):
@@ -168,9 +169,13 @@ class Live:
             pools.append(ManualPool(initializer, initargs))
             return pools[-1]
 
+        def steps_pool(initializer, initargs):  # Next Steps' background measuring (#35)
+            self.step_pools.append(ManualPool(initializer, initargs))
+            return self.step_pools[-1]
+
         return create_live_app(
             self.data_dir, transport=self.server, clock=self.clock, sleep=self.clock.sleep, background=background,
-            executor=pool,
+            executor=pool, steps_executor=steps_pool,
         )
 
     def start(self, **kwargs) -> TestClient:

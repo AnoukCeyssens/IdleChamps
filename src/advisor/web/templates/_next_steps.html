@@ -1,0 +1,23 @@
+{% macro pct(v) -%}{{ "%.0f" % v if v >= 10 else "%.1f" % v if v >= 0.1 else "%.2f" % v }}{%- endmacro %}
+{% if waiting %}
+<div data-row="steps-measuring" hx-get="/next-steps/steps?goal={{ goal | urlencode }}{% if all %}&all=true{% endif %}" hx-trigger="load delay:3s" hx-swap="outerHTML">Measuring in the background: {{ waiting }} of {{ focus_count }} Focus adventure{{ 's' if focus_count != 1 }} still to go…</div>
+{% else %}
+<div id="steps">
+  <ol class="steps">
+    {% for s in steps %}
+    <li data-row="step">
+      <strong data-row="step-gain">+{{ pct(s.gain_pct) }}% on average</strong>
+      {% if s.unverified %}<span class="badge warn" data-row="step-unverified">unverified champion</span>{% endif %}
+      <span data-row="step-reason">{{ s.reason }}</span>
+      {% if s.source %}<span class="source{{ ' unavailable' if not s.obtainable }}" data-row="step-source">Source: {{ s.source }}{% if not s.obtainable %} · can't be obtained right now (event not running){% endif %}</span>{% endif %}
+      <span class="cost" data-row="step-cost">Cost: {{ s.cost }}</span>
+    </li>
+    {% else %}
+    <li data-row="no-steps">Nothing in reach raises {{ goal }} on the Focus Set.</li>
+    {% endfor %}
+  </ol>
+  {% if not all and total > steps | length %}
+  <a class="show-all" data-row="show-all" href="/next-steps?goal={{ goal | urlencode }}&all=true">Show all {{ total }} steps</a>
+  {% endif %}
+</div>
+{% endif %}
