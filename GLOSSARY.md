@@ -18,6 +18,13 @@ _Avoid_: snapshot history, log, backup
 
 **Refresh**:
 Fetching a new Player Snapshot (and Game Definitions when they changed) from the game servers, read-only, on app start or on request.
+
+**Recommendation Key**:
+A hash of the recommendation-relevant part of the Player Snapshot (owned champions and their levels, gear, feats, specializations, familiars, modron cores, completion, best areas; never currencies). Recommendations are kept per Recommendation Key and Game Definitions checksum.
+
+**Recompute**:
+Computing every adventure × Run Goal again in the background after a Refresh changed the Recommendation Key or the Game Definitions. Until it finishes, the earlier recommendations stay visible, marked out of date.
+_Avoid_: rebuild, reindex
 _Avoid_: sync, update, reload
 
 **Run Goal**:

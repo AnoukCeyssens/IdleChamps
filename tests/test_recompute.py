@@ -112,3 +112,42 @@ def test_the_header_reloads_the_page_when_a_recompute_finishes(live, client):
     live.pools[0].run()
     assert client.get("/header", params={"seen": 1, "computed": 0}).headers.get("HX-Refresh") == "true"
     assert "HX-Refresh" not in client.get("/header", params={"seen": 1, "computed": 1}).headers
+
+
+def test_a_key_change_mid_recompute_cancels_it_and_restarts_from_the_new_snapshot(live, client):
+    first = live.pools[0]
+    first.run(1)
+
+    page = _refresh_with(live, client, _level_up).text
+
+    assert first.shut_down and first.pending == []  # pending jobs cancelled
+    [_, second] = live.pools  # the harness fails if a pool starts before the old one is shut down
+    assert _progress(page) == "Recomputing 0/4 adventures"
+    second.run()
+    assert _progress(client.get("/champions").text) is None
+
+
+def test_results_are_reused_after_a_restart_when_key_and_checksum_match(live, client):
+    live.pools[0].run()
+    before = client.get(GOLD.format(7)).text
+
+    live.server.queue("getuserdetails", _small(_more_gems))
+    restarted = live.start()  # a new app on the same data folder; its startup Refresh succeeds
+
+    assert len(live.pools) == 1  # nothing recomputed
+    page = restarted.get(GOLD.format(7)).text
+    assert rows(page, "main-dps") == rows(before, "main-dps")
+    assert rows(page, "seat-row") == rows(before, "seat-row")
+    assert rows(page, "left-out") == rows(before, "left-out")
+
+
+def test_a_definitions_change_recomputes_after_a_restart(live, client):
+    live.pools[0].run()
+
+    changed = definitions()
+    changed["checksum"] = "a-newer-checksum"
+    live.server.queue("getdefinitions", changed)
+    live.server.queue("getuserdetails", _small())
+    live.start()
+
+    assert len(live.pools) == 2

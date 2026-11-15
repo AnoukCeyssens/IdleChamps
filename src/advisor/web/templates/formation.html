@@ -133,7 +133,7 @@
     </div>
 
     {% if recommendation and stale %}
-    <p class="infeasible" data-row="stale-result">Stale: this recommendation is from before your last Refresh. It is being recomputed (progress in the header).</p>
+    <p class="infeasible" data-row="stale-result">Out of date: this recommendation is from before your last Refresh. A Recompute is running (progress in the header).</p>
     {% endif %}
     {% if recommendation %}{% set rec = recommendation %}
     <div class="recommendation">
