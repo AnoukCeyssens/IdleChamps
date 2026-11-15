@@ -11,6 +11,7 @@ tests can prove none of them is ever persisted.
 from __future__ import annotations
 
 import copy
+from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -154,11 +155,22 @@ class Live:
         self.data_dir = tmp_path / "data"
         self.log = write_request_log(tmp_path / "webRequestLog.txt")
         self.data_dir.mkdir()
+        self.pools: list[ManualPool] = []
         (self.data_dir / "config.toml").write_text(f'request_log = "{self.log}"\n')
 
-    def app(self, background=lambda job: job()):
+    def app(self, background=lambda job: job(), pools: list | None = None):
+        """`pools` collects the Recompute's worker pools (`ManualPool`s: jobs run only when a
+        test says so); by default nothing is precomputed and pages compute on demand."""
+        pools = self.pools if pools is None else pools
+
+        def pool(initializer, initargs):
+            assert all(p.shut_down for p in pools), "two recomputes side by side"
+            pools.append(ManualPool(initializer, initargs))
+            return pools[-1]
+
         return create_live_app(
-            self.data_dir, transport=self.server, clock=self.clock, sleep=self.clock.sleep, background=background
+            self.data_dir, transport=self.server, clock=self.clock, sleep=self.clock.sleep, background=background,
+            executor=pool,
         )
 
     def start(self, **kwargs) -> TestClient:
@@ -167,3 +179,41 @@ class Live:
         client = TestClient(self.app(**kwargs))
         client.__enter__()
         return client
+
+
+class ManualPool:
+    """A stand-in for the Recompute's process pool, in this process: a job runs only when a
+    test calls `run()`, so tests can look at the app while a recompute is half done."""
+
+    def __init__(self, initializer, initargs) -> None:
+        self._init = (initializer, initargs)
+        self.pending: list[tuple[Future, object, tuple]] = []
+        self.shut_down = False
+
+    def submit(self, fn, *args) -> Future:
+        assert not self.shut_down, "job submitted to a shut-down pool"
+        future: Future = Future()
+        self.pending.append((future, fn, args))
+        return future
+
+    def run(self, count: int | None = None) -> None:
+        """Run the next `count` pending jobs (all by default), as a worker would."""
+        initializer, initargs = self._init
+        while self.pending and (count is None or count > 0):
+            future, fn, args = self.pending.pop(0)
+            if count is not None:
+                count -= 1
+            if not future.set_running_or_notify_cancel():
+                continue
+            initializer(*initargs)
+            try:
+                future.set_result(fn(*args))
+            except Exception as error:
+                future.set_exception(error)
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        self.shut_down = True
+        if cancel_futures:
+            for future, _, _ in self.pending:
+                future.cancel()
+            self.pending = []

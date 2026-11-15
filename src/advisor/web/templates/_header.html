@@ -1,5 +1,5 @@
 {% set h = request.app.state.header() %}
-<header id="header"{% if h.mode == "live" %} hx-get="/header?seen={{ h.status.generation }}" hx-trigger="every 5s" hx-swap="outerHTML"{% endif %}>
+<header id="header"{% if h.mode == "live" %} hx-get="/header?seen={{ h.status.generation }}" hx-trigger="every 5s" hx-swap="outerHTML" hx-vals='{"computed": {{ h.recompute.completed }}}'{% endif %}>
   <div class="bar">
     <span><a href="/champions">Idle Champions Advisor</a>
     <a href="/adventures" class="nav">Adventures</a></span>
@@ -7,6 +7,7 @@
     <span class="refresh-state" data-row="refresh-state">Offline mode: reading the game's request log</span>
     {% else %}{% set s = h.status %}
     <span class="refresh-state" data-row="refresh-state">{% if s.running %}Refreshing…{% elif h.ago is not none %}refreshed {{ h.ago }} ago{% else %}Not refreshed yet{% endif %}</span>
+    {% if h.recompute.running %}<span class="refresh-state" data-row="recompute-progress">Recomputing {{ h.recompute.done }}/{{ h.recompute.total }} adventures</span>{% endif %}
     <form method="post" action="/refresh" class="refresh">
       <button type="submit" data-row="refresh-button"{% if s.running or s.cooldown_left %} disabled{% endif %}>
         {%- if s.running %}Refreshing…{% elif s.cooldown_left %}Refresh in {{ s.cooldown_left }} s{% else %}Refresh{% endif -%}
