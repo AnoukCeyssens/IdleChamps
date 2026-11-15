@@ -10,6 +10,8 @@ slots (a min-cost flow: a seat number holds at most one champion, so each seat r
 champion and loadout for that slot), then hill-climbs on the full score. The assignment of bounds is
 an upper bound per (Main DPS, slot); the best of them minus the best found is the reported gap.
 `exhaustive_search` tries every legal formation and is only for tiny instances (the test oracle).
+`exact_search` is the on-demand exact CP-SAT solve (#31), time-limited and never worse than the
+fast result it is given.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import itertools
 import math
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from advisor.catalogue import Slot
@@ -101,6 +103,132 @@ def exhaustive_search(problem: SearchProblem, scorer_for: ScorerFor) -> SearchRe
     if best is None:
         return None
     return SearchResult(best[1], best[2], best[0], best[0].value, 0.0, exact=True)
+
+
+# Exact solve (#31): log weights are scaled to integers for CP-SAT. Each seat's weight is rounded,
+# so the bound read back from the solver gets `_ROUNDING` per slot of slack to stay an upper bound,
+# and two scores closer than `_PROVEN_TOL` count as equal (≈0.001%).
+_SCALE = 1e6
+_FILL_UNITS = 1000  # integer weight = bound units × this + 1: fills a free slot only on a tie
+_ROUNDING = 0.5 / _SCALE
+_PROVEN_TOL = 1e-5
+
+EXACT_TIME_LIMIT_S = 60.0
+
+
+def exact_search(
+    problem: SearchProblem,
+    scorer_for: ScorerFor,
+    time_limit_s: float = EXACT_TIME_LIMIT_S,
+    incumbent: SearchResult | None = None,
+) -> SearchResult | None:
+    """Provably best formation, within `time_limit_s` (CP-SAT per Main DPS seat).
+
+    Main DPS seats are tried in descending order of their assignment bound and skipped once that
+    bound can't beat the best found. Each one is a CP-SAT model maximising the sum of seat bounds;
+    every solution is scored in full and cut off, until the solver's bound is no better than the
+    best score. That is exact for any scorer whose `bound` honours its contract, separable or not.
+
+    With an `incumbent` (the fast search's result), the answer never gets worse: a strictly better
+    formation comes back with `exact=True`; otherwise the incumbent comes back with its gap
+    tightened to what the solve proved (zero when it finished).
+    """
+    from ortools.sat.python import cp_model
+
+    deadline = time.perf_counter() + max(0.0, time_limit_s)
+    best = (incumbent.score, incumbent.main_dps, incumbent.seats) if incumbent else None
+    found_here = False
+    plans = []
+    for main in _main_seats(problem):
+        scorer = scorer_for(main)
+        plan = _assign(problem, main, scorer)
+        if plan is not None:
+            plans.append((plan[0], main, scorer))
+    plans.sort(key=lambda p: -p[0])
+    open_bound = -math.inf  # highest bound over the work the time limit cut short
+    for bound, main, scorer in plans:
+        if best is not None and bound <= best[0].value + _PROVEN_TOL:
+            break  # sorted: nothing left can beat the best found
+        if time.perf_counter() >= deadline:
+            open_bound = max(open_bound, bound)
+            break
+        base = scorer.score((main,)).value
+        built = _exact_model(cp_model, problem, main, scorer)
+        if built is None:
+            continue  # a forced champion has no legal slot around this Main DPS seat
+        model, choices = built
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                open_bound = max(open_bound, bound)
+                break
+            solver = cp_model.CpSolver()
+            solver.parameters.max_time_in_seconds = remaining
+            status = solver.Solve(model)
+            if status == cp_model.INFEASIBLE or status == cp_model.MODEL_INVALID:
+                break  # no formation left around this Main DPS seat
+            if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                open_bound = max(open_bound, min(bound, _read_bound(solver, base, len(problem.slots))))
+                break  # out of time before any solution
+            chosen = [(x, seat) for x, seat in choices if solver.Value(x)]
+            seats = (main, *(seat for _, seat in chosen))
+            score = scorer.score(seats)
+            if best is None or score.value > best[0].value + 1e-12:
+                best, found_here = (score, main, seats), True
+            reachable = min(bound, _read_bound(solver, base, len(problem.slots)))
+            if reachable <= best[0].value + _PROVEN_TOL:
+                break  # nothing around this seat beats the best found
+            if status != cp_model.OPTIMAL:
+                open_bound = max(open_bound, reachable)
+                break  # out of time
+            # This exact formation is scored: cut it off and look for the next best by bounds.
+            model.AddBoolOr([x.Not() if solver.Value(x) else x for x, _ in choices])
+    if best is None:
+        return None
+    ceiling = max(best[0].value, open_bound)
+    if incumbent is not None:
+        ceiling = max(best[0].value, min(ceiling, incumbent.upper_bound))
+    gap = 0.0 if ceiling - best[0].value <= _PROVEN_TOL else _gap_pct(ceiling, best[0].value)
+    if incumbent is not None and not found_here:
+        return replace(incumbent, upper_bound=ceiling, gap_pct=gap)
+    return SearchResult(best[1], best[2], best[0], ceiling, gap, exact=True)
+
+
+def _exact_model(cp_model, problem: SearchProblem, main: Seat, scorer: Scorer):
+    """CP-SAT model around a fixed Main DPS seat: one boolean per (champion, slot, loadout)."""
+    model = cp_model.CpModel()
+    usable = [s.index for s in problem.slots if s.index != main.slot]
+    choices = []
+    by_slot: dict[int, list] = {}
+    by_seat_number: dict[int, list] = {}
+    objective = []
+    for c in _others(problem, main):
+        slots = [c.forced_slot] if c.forced_slot is not None else usable
+        mine = []
+        for slot in slots:
+            if slot not in usable:
+                continue
+            for loadout in c.loadouts:
+                seat = Seat(c.champion_id, slot, loadout)
+                x = model.NewBoolVar(f"c{c.champion_id}_s{slot}_{len(choices)}")
+                choices.append((x, seat))
+                mine.append(x)
+                by_slot.setdefault(slot, []).append(x)
+                by_seat_number.setdefault(c.seat, []).append(x)
+                objective.append(x * (round(scorer.bound(seat) * _SCALE) * _FILL_UNITS + 1))
+        if c.forced:
+            if not mine:
+                return None
+            model.AddExactlyOne(mine)
+    for group in (*by_slot.values(), *by_seat_number.values()):
+        model.AddAtMostOne(group)
+    model.Maximize(sum(objective))
+    return model, choices
+
+
+def _read_bound(solver, base: float, slots: int) -> float:
+    """The solver's proven objective bound, back in log units (rounded up to stay an upper bound)."""
+    return base + math.floor(solver.BestObjectiveBound()) / _FILL_UNITS / _SCALE + slots * _ROUNDING
 
 
 def _gap_pct(upper_bound: float, found: float) -> float:
