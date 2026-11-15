@@ -1,0 +1,10 @@
+<p class="count">{{ rows | length }} champions{% if role %} tagged {{ role }}{% endif %}</p>
+<ul class="champions">
+  {% for row in rows %}{% set c = row.champion %}
+  <li data-row="champion" class="champion {{ 'owned' if row.owned else 'unowned' }}">
+    <span class="name">{{ c.name }}</span>
+    <span class="state">· {% if row.owned %}Level {{ row.owned.level }}{% else %}{{ c.source.label }}{% endif %}</span>
+    <span class="tags">· Seat {{ c.seat }}{% if c.role_tags %} · {{ c.role_tags | join(", ") }}{% endif %}</span>
+  </li>
+  {% endfor %}
+</ul>

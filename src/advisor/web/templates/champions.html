@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Champions · Idle Champions Advisor{% endblock %}
+{% block main %}
+<h1>Champions</h1>
+<nav class="filters" aria-label="Filter by role tag">
+  <a href="/champions" hx-get="/champions" hx-target="#champions" hx-push-url="true"
+     data-row="role-filter" class="{{ 'active' if role is none }}">All</a>
+  {% for tag in role_tags %}
+  <a href="/champions?role={{ tag }}" hx-get="/champions?role={{ tag }}" hx-target="#champions" hx-push-url="true"
+     data-row="role-filter" class="{{ 'active' if role == tag }}">{{ tag }}</a>
+  {% endfor %}
+</nav>
+<div id="champions">{% include "_champion_rows.html" %}</div>
+{% endblock %}
