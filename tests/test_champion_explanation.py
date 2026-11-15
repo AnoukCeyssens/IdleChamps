@@ -100,8 +100,12 @@ def test_choices_that_differ_per_run_goal_give_the_reason(tmp_path):
 def test_the_champion_page_loads_its_next_steps_per_run_goal(hinted):
     page = hinted.get("/champions/2").text
     assert [r["text"] for r in rows(page, "champion-steps-loading")] == [
-        "Gem Farm: measuring Next Steps…", "Gold Farm: measuring Next Steps…",
+        "Push: measuring Next Steps…", "Gem Farm: measuring Next Steps…", "Gold Farm: measuring Next Steps…",
     ]
+    for goal in ("Push", "Gem%20Farm"):  # every Next Steps tab, Push (#36) first, answers
+        answered = hinted.get(f"/champions/2/next-steps?goal={goal}").text
+        assert rows(answered, "champion-step") or rows(answered, "no-champion-steps")
+        assert all("Celeste" in r["text"] for r in rows(answered, "champion-step"))
 
     steps = hinted.get("/champions/2/next-steps?goal=Gold%20Farm").text  # Focus Set: Pure Energy
     found = [r["text"] for r in rows(steps, "champion-step")]

@@ -25,6 +25,7 @@ from advisor.explorer import RUN_GOALS, adventure_node, is_running, tree
 from advisor.hints import hints as one_change_hints
 from advisor.history import write_history
 from advisor.next_steps import NEXT_STEP_GOALS, TOP_STEPS, FocusSets, Steps, measure_adventure, next_steps
+from advisor.next_steps import ready_to_complete
 from advisor.game_client import DEFAULT_LOG, HttpTransport, LiveGameClient, OfflineGameClient, Transport
 from advisor.recommendation import recommend, with_search_problem
 from advisor.recompute import ExecutorFactory, Recompute, process_pool
@@ -86,7 +87,7 @@ def create_app(
         models = ChampionModels(catalogue, account, statuses=ledger.statuses())
         results.update(raw, catalogue, account, models, precompute=refreshed)
         hints.clear()
-        steps.update(raw, account)
+        steps.update(raw, account, catalogue, models)  # with the Area Set Cache and Model Statuses (#36)
         steps.ensure((a, g) for g in NEXT_STEP_GOALS for a in focus.get(catalogue, account, g))
 
     load(raw, refreshed=False)
@@ -257,11 +258,11 @@ def create_app(
         }
         return _TEMPLATES.TemplateResponse(request, "next_steps.html", context)
 
-    @app.get("/next-steps/steps", response_class=HTMLResponse)
-    def next_steps_list(request: Request, goal: str = NEXT_STEP_GOALS[0], all: bool = False) -> HTMLResponse:
-        """The ranked steps, loaded by the Next Steps tab; measured in the background in live mode,
-        on demand otherwise."""
-        goal = goal if goal in NEXT_STEP_GOALS else NEXT_STEP_GOALS[0]
+    def _ranked_steps(goal: str) -> tuple[tuple, int, int]:
+        """(the Run Goal's ranked Next Steps, Focus adventures still measuring in the background,
+        Focus Set size). Steps come from the steps cache (background-measured in live mode, with
+        the Area Set Cache and Model Statuses); what's missing is measured on demand. Shared by the
+        Next Steps tab and the champion page (#37)."""
         adventures = [a for i in focus.get(catalogue, account, goal) if (a := catalogue.adventure(i))]
         steps.ensure((a.id, goal) for a in adventures)
         measured, waiting = {}, 0
@@ -277,15 +278,33 @@ def create_app(
                     steps.put(adventure.id, goal, found)
             measured[adventure.id] = found
         ranked = () if waiting else next_steps(catalogue, account, adventures, measured)
+        return ranked, waiting, len(adventures)
+
+    @app.get("/next-steps/steps", response_class=HTMLResponse)
+    def next_steps_list(request: Request, goal: str = NEXT_STEP_GOALS[0], all: bool = False) -> HTMLResponse:
+        """The ranked steps, loaded by the Next Steps tab; measured in the background in live mode,
+        on demand otherwise."""
+        goal = goal if goal in NEXT_STEP_GOALS else NEXT_STEP_GOALS[0]
+        ranked, waiting, focus_count = _ranked_steps(goal)
         context = {
             "goal": goal,
             "all": all,
             "waiting": waiting,
-            "focus_count": len(adventures),
+            "focus_count": focus_count,
             "steps": ranked if all else ranked[:TOP_STEPS],
             "total": len(ranked),
         }
         return _TEMPLATES.TemplateResponse(request, "_next_steps.html", context)
+
+    @app.get("/next-steps/ready", response_class=HTMLResponse)
+    def ready_list(request: Request) -> HTMLResponse:
+        """Push's Ready to complete block, loaded by the Push tab (#36)."""
+
+        def verdict_for(adventure, patron):
+            return results.get(adventure, "Push", patron)[0].push_verdict
+
+        ready = ready_to_complete(catalogue, account, verdict_for)
+        return _TEMPLATES.TemplateResponse(request, "_ready.html", {"ready": ready})
 
     @app.get("/champions/{champion_id}", response_class=HTMLResponse)
     def champion_detail(request: Request, champion_id: int) -> HTMLResponse:
@@ -335,32 +354,13 @@ def create_app(
             "step_goals": NEXT_STEP_GOALS,
         }
 
-    def _ranked_steps(goal: str) -> tuple[tuple, int]:
-        """(the Run Goal's ranked Next Steps, Focus adventures still measuring in the background),
-        measuring what's missing on demand like the Next Steps tab does."""
-        adventures = [a for i in focus.get(catalogue, account, goal) if (a := catalogue.adventure(i))]
-        steps.ensure((a.id, goal) for a in adventures)
-        measured, waiting = {}, 0
-        for adventure in adventures:
-            found = steps.get(adventure.id, goal)
-            if found is None and steps.pending(adventure.id, goal):
-                waiting += 1
-                continue
-            if found is None:
-                rec, stale = results.get(adventure, goal)
-                found = measure_adventure(catalogue, account, rec, models=models)
-                if not stale:
-                    steps.put(adventure.id, goal, found)
-            measured[adventure.id] = found
-        return (() if waiting else next_steps(catalogue, account, adventures, measured)), waiting
-
     @app.get("/champions/{champion_id}/next-steps", response_class=HTMLResponse)
     def champion_next_steps(request: Request, champion_id: int, goal: str = NEXT_STEP_GOALS[0]) -> HTMLResponse:
         """One Run Goal's Next Steps that involve this champion, loaded by its page."""
         champion = catalogue.find(champion_id)
         if champion is None or goal not in NEXT_STEP_GOALS:
             raise HTTPException(404, "No such champion or Next Steps tab")
-        ranked, waiting = _ranked_steps(goal)
+        ranked, waiting, _ = _ranked_steps(goal)
         context = {"champion": champion, "goal": goal, "waiting": waiting, "steps": champion_steps(champion_id, ranked)}
         return _TEMPLATES.TemplateResponse(request, "_champion_steps.html", context)
 

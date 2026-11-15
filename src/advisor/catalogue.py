@@ -146,6 +146,9 @@ class Patron:
     id: int
     name: str
     restrictions: tuple[Restriction, ...] = ()
+    # Its unlock `requirements` from `patron_defines`, as sent (shape assumed like an adventure's,
+    # `{"condition": "adventure_complete", "adventure_id": ...}`: the recording has no `patron_defines`).
+    requirements: tuple = field(default=(), hash=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -427,6 +430,7 @@ def _patron(define: dict) -> Patron:
         id=patron_id,
         name=define["name"],
         restrictions=_restrictions(define.get("game_changes")) or _PATRON_RESTRICTIONS.get(patron_id, ()),
+        requirements=tuple(r for r in define.get("requirements") or () if isinstance(r, dict)),
     )
 
 

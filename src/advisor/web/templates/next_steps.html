@@ -16,6 +16,9 @@
   ol.steps li { margin: 0 0 10px; }
   ol.steps .cost, ol.steps .source { display: block; color: var(--muted); font-size: 13px; }
   ol.steps .source.unavailable { color: #b35c00; }
+  ol.ready { padding-left: 22px; }
+  ol.ready li { margin: 0 0 6px; }
+  ol.ready .unlocks { display: block; color: var(--muted); font-size: 13px; }
 </style>
 <h1>Next Steps</h1>
 <nav class="tabs" aria-label="Run Goal">
@@ -23,6 +26,12 @@
   <a data-row="next-steps-tab" class="{{ 'on' if g == goal }}" href="/next-steps?goal={{ g | urlencode }}" {% if g == goal %}aria-current="page"{% endif %}>{{ g }}</a>
   {% endfor %}
 </nav>
+
+{% if goal == "Push" %}
+<h2>Ready to complete</h2>
+<p class="muted">Objectives the Push Verdict now calls Likely that you haven't completed and can start now.</p>
+<div data-row="ready-loading" hx-get="/next-steps/ready" hx-trigger="load" hx-swap="outerHTML">Estimating every objective you can start…</div>
+{% endif %}
 
 <h2>Focus Set</h2>
 <p class="muted">The adventures these steps are measured on. Pin more from an adventure's header.</p>
