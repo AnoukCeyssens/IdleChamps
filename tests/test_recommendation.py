@@ -14,6 +14,7 @@ import pytest
 
 from advisor.account import parse_account
 from advisor.catalogue import Slot, parse_catalogue
+from advisor.champion_models import RECONSTRUCTIONS
 from advisor.recommendation import recommend
 from advisor.request_log import read_responses
 from conftest import FIXTURE_LOG
@@ -223,7 +224,10 @@ def test_gold_farm_states_its_scoring_assumptions_and_unverified_champions(catal
     assert "click" in text.lower() and "daily" in text.lower()
     assert "relative" in text
     assert set(rec.unverified_champions) == {s.champion for s in _seated(rec)}
-    assert all(s.model_status.value == "Not Modelled" for s in _seated(rec))
+    # Reconstructed champions (#40) start Stale until a live damage check; the rest are Not Modelled.
+    assert all(
+        s.model_status.value == ("Stale" if s.champion.id in RECONSTRUCTIONS else "Not Modelled") for s in _seated(rec)
+    )
 
 
 def test_between_equal_scores_the_higher_level_champion_takes_the_seat(catalogue, account):

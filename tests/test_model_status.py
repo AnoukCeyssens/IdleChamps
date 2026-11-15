@@ -66,7 +66,10 @@ def test_model_status_filter_on_the_champions_list(client):
     everyone = client.get("/champions", params={"status": "Not Modelled"}).text
     nobody = client.get("/champions", params={"status": "Verified"}).text
 
-    assert len(rows(everyone, "champion")) == 168
+    # 168 champions, 5 of them reconstructed (#40 batch 1: Kas, Briv, Gazrick, Lucius, Hew Maan) and
+    # never checked against the game, so Stale.
+    assert len(rows(everyone, "champion")) == 163
+    assert len(rows(client.get("/champions", params={"status": "Stale"}).text, "champion")) == 5
     assert rows(nobody, "champion") == []
     offered = {r["text"] for r in rows(everyone, "status-filter")}
     assert offered == {"Any status", "Not Modelled", "Verified", "Check Failed", "Stale"}
@@ -75,7 +78,7 @@ def test_model_status_filter_on_the_champions_list(client):
 def test_status_filter_combines_with_the_role_filter(client):
     page = client.get("/champions", params={"role": "dps", "status": "Not Modelled"}).text
 
-    assert len(rows(page, "champion")) == 49
+    assert len(rows(page, "champion")) == 47  # 49 dps champions, Kas and Lucius reconstructed
 
 
 def test_champion_page_shows_its_model_status(client):

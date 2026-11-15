@@ -317,6 +317,7 @@ def create_app(
                 "spec_choices": catalogue.specializations.get(champion_id, ()),
                 "model_status": models.status(champion_id),
                 "model_evidence": _evidence(models, ledger, champion_id),
+                "explanation": models.explain(champion_id),
             },
         )
 

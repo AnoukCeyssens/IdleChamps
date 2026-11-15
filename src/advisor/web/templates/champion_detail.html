@@ -33,6 +33,20 @@
   <p class="muted"><a href="/model-status">All Model Statuses and flags</a></p>
 </section>
 
+<section class="detail explanation">
+  <h2>What the model counts</h2>
+  <ul>
+    {% for line in explanation.lines %}
+    <li data-row="explanation">{{ line.text }}</li>
+    {% else %}
+    <li class="muted">No effects the model can score{{ " yet" if model_status.value == "Not Modelled" }}.</li>
+    {% endfor %}
+    {% for a in explanation.assumptions %}
+    <li data-row="explanation-assumption" class="muted">{{ a }}</li>
+    {% endfor %}
+  </ul>
+</section>
+
 {% if owned %}
 <section class="detail">
   <h2>Gear</h2>

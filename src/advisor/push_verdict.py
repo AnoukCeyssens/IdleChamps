@@ -285,6 +285,8 @@ def _breaking_failure(curve, log_health_mult, found: AreaSet, adventure, scorer,
     """(area, why) of the first Armoured or Hits-based boss the formation can't break, up to `until`."""
     log_normal = math.log(curve.base_health)
     rates: dict[tuple, float] = {}
+    # Armour ablation (Gazrick) lowers the health a hit must reach to break a chunk.
+    log_kept = math.log(max(1e-12, 1 - scorer.armour_ablation(formation)))
     for area in range(1, min(until, MAX_AREA) + 1):
         if area > 1:
             log_normal += math.log(_growth(curve, area))
@@ -299,7 +301,7 @@ def _breaking_failure(curve, log_health_mult, found: AreaSet, adventure, scorer,
                     rates[key] = scorer.breaking_rate(formation, "hits")
                 rate, what = rates[key], f"hits-based, {health.segments:g} hits"
             elif health.kind == "armoured":
-                log_chunk = log_normal + math.log(health.health_modifier) + log_health_mult - math.log(health.segments)
+                log_chunk = log_normal + math.log(health.health_modifier) + log_health_mult - math.log(health.segments) + log_kept
                 qualifies = log_hit >= log_chunk
                 rate = scorer.breaking_rate(
                     formation, "armoured", main_qualifies=qualifies, ult_min_modifier=math.exp(min(log_chunk - log_hit, 700))

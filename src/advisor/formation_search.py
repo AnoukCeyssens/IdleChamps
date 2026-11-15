@@ -525,3 +525,10 @@ def plan_bounds(problem: SearchProblem, scorer_for: ScorerFor) -> dict[Seat, flo
         if plan is not None:
             bounds[main] = plan[0]
     return bounds
+
+
+def lifted(problem: SearchProblem, scorer: Scorer, value: float) -> float:
+    """A placement-level bound in the Run Goal's units: lifted by the best setup (familiars, cores)."""
+    if not _has_setup(problem):
+        return value
+    return max(scorer.lift(value, s) for s in _lift_setups(problem))

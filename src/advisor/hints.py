@@ -19,7 +19,13 @@ A change is re-searched only if its bound could beat the recommendation's score;
 changes are re-searched best bound first and the rest are dropped once no bound can reach the
 `limit`-th best gain found. This relies on `Scorer.bound` holding its contract (never below what a
 seat adds) and on a champion's changes reaching other seats only through that champion's own
-effects; per-champion reconstructions with interactions (#40) must keep both true.
+effects; per-champion reconstructions with interactions (#40) must keep both true (Kas-style
+per-champion stacks count only for their owner as Main DPS, whose plans are re-bounded directly).
+
+The bounds use the recommendation's own scorers: its adventure (Gem Farm's run model), its breaking
+needs (Push), and are lifted by the best familiar/core setup into the Run Goal's units before they
+are compared with its score. A change is "seen" when anything the Scorer reads about that champion
+changes (`ChampionModels.footprint`: effects, Breaker effects, skips, ablation), not only its damage.
 """
 
 from __future__ import annotations
@@ -31,7 +37,8 @@ from dataclasses import dataclass, replace
 from advisor.account import RARITY_NAMES, Account, OwnedChampion, OwnedGear
 from advisor.catalogue import GEAR_SLOTS, Catalogue
 from advisor.champion_models import ChampionModels, Seat
-from advisor.formation_search import Candidate, plan_bounds
+from advisor.formation_search import Candidate, lifted, plan_bounds
+from advisor.push_verdict import breaking_needs
 from advisor.recommendation import FormationRecommendation, recommend
 from advisor.restrictions import failed
 
@@ -188,6 +195,10 @@ class _Bounder:
         self.models = models
         self.problem = rec.problem
         self._base_scorers: dict[Seat, object] = {}  # shared across changes, so their bound caches are reused
+        adventure, patron = rec.adventure, rec.patron.id if rec.patron else None
+        # The re-search's score is the damage-only score less any breaking penalty, which the
+        # breaking scorer's bound covers either way.
+        self.needs = breaking_needs(catalogue, adventure, patron) if rec.run_goal == "Push" else ()
         self.plans = plan_bounds(self.problem, self._base_scorer)
         self.by_id = {c.champion_id: c for c in self.problem.candidates}
         self.rules = (*rec.adventure.restrictions, *(rec.patron.restrictions if rec.patron else ()))
@@ -196,26 +207,39 @@ class _Bounder:
 
     def _base_scorer(self, main: Seat):
         if main not in self._base_scorers:
-            self._base_scorers[main] = self.models.scorer(self.rec.adventure.layout, self.rec.run_goal, main)
+            self._base_scorers[main] = self._scorer_for(self.models)(main)
         return self._base_scorers[main]
 
     def _scorer_for(self, models: ChampionModels):
-        layout, goal = self.rec.adventure.layout, self.rec.run_goal
-        return lambda main: models.scorer(layout, goal, main)
+        adventure, goal, needs = self.rec.adventure, self.rec.run_goal, self.needs
+        return lambda main: models.scorer(adventure.layout, goal, main, adventure=adventure, breaking=needs)
+
+    def _lifted(self, main: Seat, value: float) -> float:
+        return lifted(self.problem, self._base_scorer(main), value)
 
     def bound(self, change: Change, changed: ChampionModels) -> float:
         if change.kind == "potion":
             return self._potion(changed)
         if change.kind == "modron":
-            return max(plan_bounds(self.problem, self._scorer_for(changed)).values(), default=-math.inf)
+            new = self._scorer_for(changed)
+            return max(
+                (lifted(self.problem, new(m), b) for m, b in plan_bounds(self.problem, new).items()), default=-math.inf
+            )
         return self._champion(change.champion_id, changed)
 
     def _potion(self, changed: ChampionModels) -> float:
         if not changed.potion_effects():
             return -math.inf
         old, new = self._base_scorer, self._scorer_for(changed)
+        # In Gem Farm with skips the score isn't separable; log gems per hour rise by at most the
+        # potions' log damage there.
+        damage = sum(max(0.0, e.log) for e in changed.potion_effects() if e.kind == "damage")
         return max(
-            (b + new(m).score((m,)).value - old(m).score((m,)).value for m, b in self.plans.items()), default=-math.inf
+            (
+                self._lifted(m, b + (damage if old(m).speed_mode else new(m).score((m,)).value - old(m).score((m,)).value))
+                for m, b in self.plans.items()
+            ),
+            default=-math.inf,
         )
 
     def _champion(self, champion_id: int, changed: ChampionModels) -> float:
@@ -227,7 +251,7 @@ class _Bounder:
             return -math.inf  # restricted out: the re-search wouldn't seat it either
         loadouts = changed.loadouts(champion_id)
         if before is not None and loadouts == before.loadouts and all(
-            changed.effects(champion_id, l) == self.models.effects(champion_id, l) for l in loadouts
+            changed.footprint(champion_id, l) == self.models.footprint(champion_id, l) for l in loadouts
         ):
             return -math.inf  # the models see no difference
         after = Candidate(
@@ -250,9 +274,10 @@ class _Bounder:
                     was = max((old_scorer.bound(Seat(champion_id, slot, l)) for l in before.loadouts), default=0.0) if before else 0.0
                     now = max(new_scorer.bound(Seat(champion_id, slot, l)) for l in loadouts)
                     rise = max(rise, now - was)
-            best = max(best, plan + rise)
+            best = max(best, self._lifted(main, plan + rise))
         if "dps" in champion.tags or self.anyone_leads:
             others = tuple(c for c in self.problem.candidates if c.champion_id != champion_id)
             leading = replace(self.problem, candidates=(*others, after), main_dps_ids=frozenset({champion_id}))
-            best = max(best, *plan_bounds(leading, new).values(), -math.inf)
+            for main, plan in plan_bounds(leading, new).items():
+                best = max(best, lifted(leading, new(main), plan))
         return best + _SLACK

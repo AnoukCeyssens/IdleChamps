@@ -11,12 +11,21 @@ The one place that knows what champions do. Formation Search only sees this inte
 - `Scorer.bound(seat)`: an optimistic log weight for one seat, never below what that seat adds to any
   formation with this Main DPS. The search builds its assignment and its gap from it.
 
-This version is the generic layer (spec #22 build step 3): effect keys that are plain data
-(`hero_dps_multiplier_mult`, `global_dps_multiplier_mult`, `gold_multiplier_mult`, `buff_upgrade(s)`)
-with positional `targets`, from upgrades, chosen specializations, gear and feats. Everything else
-(expressions, stacks, triggers, champion-unique keys) is skipped, so every champion is Not Modelled
-and scored on its generic effects only. Per-champion reconstructions (#40) plug in behind the same
-interface.
+The generic layer (spec #22 build step 3) reads effect keys that are plain data
+(`hero_dps_multiplier_mult`, `global_dps_multiplier_mult`, `gold_multiplier_mult`, `buff_upgrade(s)`,
+the generic Breaker keys) with positional `targets`, from upgrades, chosen specializations, gear and
+feats. Everything else (expressions, stacks, triggers, champion-unique keys) is skipped there.
+
+Per-champion reconstructions (#40, ADR-0001) plug in behind the same interface: a `Reconstruction`
+in `RECONSTRUCTIONS` (the batches live in `advisor.reconstructions`) reads its champion's ability keys
+(`AbilityKey`: the key, its parameters and fields, buffs already applied) and returns `Reconstructed`
+effects in the shared vocabulary: damage and gold effects (optionally stacking once per seated champion
+with a tag, `_Effect.per`), Breaker effects (optionally only from some positions, `_BreakEffect.where`),
+Briv-style area skips (`Skips`, Gem Farm) and armour threshold ablation (Push Verdict). The keys it
+claims are taken out of the generic layer, so nothing counts twice. The Scorer only knows the
+vocabulary, never a champion, and `Scorer.bound` stays an upper bound for every kind (see there).
+`ChampionModels.explain` is the second interface: a `ChampionExplanation` of what the model makes of
+one champion for this Account (the values description tests and tooltip fixtures check).
 """
 
 from __future__ import annotations
@@ -24,6 +33,7 @@ from __future__ import annotations
 import enum
 import itertools
 import math
+import random
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -69,7 +79,10 @@ GEMS_PER_BOSS = 2.0  # the recording: 161 gems from 83 bosses this reset
 AREA_SECONDS = 10.0  # an area the formation kills at once: walking and spawns
 KILL_SECONDS = 10.0  # extra time at the one-shot area, growing with monster health past it
 RESET_SECONDS = 30.0  # the modron reset and reload, per run
-STACKING_SECONDS = 0.0  # no stack-based effect is modelled yet (Briv's reconstruction, #40, adds it)
+STACKING_SECONDS = 0.0  # stacking time of a run without area skips
+SKIP_STACKING_SECONDS = 15.0  # a run with area skips (Briv): one offline stack of Haste per run
+MONTE_CARLO_RUNS = 200  # simulated runs per skip profile (Briv's skips, Gem Farm)
+_MONTE_CARLO_SEED = 40  # fixed: the same profile always gives the same estimate
 RAMP_SECONDS = 30.0  # levelling the formation again after each reset
 FIELD_FAMILIAR_SECONDS = 5.0  # ramp time saved per familiar on the field (it levels its champion)
 CLICK_FAMILIAR_SHARE = 0.10  # each familiar on clicks kills 10% faster where the formation can't one-shot
@@ -78,7 +91,8 @@ MAX_RESET_AREA = 2500  # game rule `max_modron_auto_reset_area`
 GEM_FARM_ASSUMPTIONS = (
     "Gems per hour = gems per run ÷ run time, about 2 gems per boss (every 5th area up to the reset area).",
     "Stacks are taken at their expected count at the reset area; random effects at their expected value. "
-    "Briv's skips are not modelled yet (generic effects only): every area is walked.",
+    "Area skips (Briv) are simulated by Monte-Carlo when a champion with them is seated (see that champion's "
+    "assumption); otherwise every area is walked.",
     "Your best area on this adventure is where the Main DPS alone stops killing at once; every ×2.031 of "
     "buffs to it (×1.85 on events) moves that one area further. Past it, each area takes longer by the "
     "monster health growth.",
@@ -103,18 +117,6 @@ class ModelStatus(enum.Enum):
     VERIFIED = "Verified"
     CHECK_FAILED = "Check Failed"
     STALE = "Stale"
-
-
-@dataclass(frozen=True)
-class Reconstruction:
-    """A champion's hand-built model of its unique effects (#40). `description_tests`: the test ids
-    that check it against the champion's description; the suite keeps them passing."""
-
-    description_tests: tuple[str, ...] = ()
-
-
-# Champion id -> its reconstruction. Champions not listed are Not Modelled (generic effects only).
-RECONSTRUCTIONS: dict[int, Reconstruction] = {}
 
 
 @dataclass(frozen=True)
@@ -165,6 +167,7 @@ class _BreakEffect:
     amount: float
     kinds: frozenset[str]
     targets: tuple
+    where: str | None = None  # only while its owner sits there: None (anywhere) | "middle_columns"
 
 
 @dataclass(frozen=True)
@@ -172,6 +175,95 @@ class _Effect:
     kind: str  # "damage" | "gold"
     log: float  # log of the multiplier
     targets: tuple  # "self", "all", "adj", ... or ("hero", id)
+    # Stacks once per seated champion matching it, e.g. ("tag", "evil"). Only with targets ("self",),
+    # and only counted when its owner is the Main DPS (so each match adds a fixed amount: separable).
+    per: tuple[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class Skips:
+    """Area skips (Briv's Unnatural Haste): after each area, `chance` to jump `areas` areas ahead."""
+
+    areas: int
+    chance: float
+
+
+@dataclass(frozen=True)
+class AbilityKey:
+    """One effect key a champion's loadout has, as a reconstruction reads it."""
+
+    key: str
+    params: tuple[str, ...]
+    fields: Mapping = field(default_factory=dict, compare=False)
+    upgrade_id: int | None = None  # the upgrade that grants it (None: gear or feat)
+    effect_id: int | None = None  # its `effect_defines` row, when linked by `effect_def`
+    buff_pct: float = 0.0  # % its upgrade is raised by (`buff_upgrade` from gear, feats, upgrades)
+
+    def amount(self, index: int = 0) -> float | None:
+        """Parameter `index` as a number, raised by the buffs on its upgrade."""
+        value = _float(list(self.params), index)
+        return None if value is None else value * (1 + self.buff_pct / 100)
+
+    def raw(self, index: int) -> float | None:
+        """Parameter `index` as a number, unbuffed."""
+        return _float(list(self.params), index)
+
+
+@dataclass(frozen=True)
+class ExplanationLine:
+    label: str  # e.g. "Skip chance"
+    value: float | None  # the number a tooltip shows (None: text only)
+    text: str  # e.g. "100% chance to skip 3 areas"
+
+
+@dataclass(frozen=True)
+class ChampionExplanation:
+    """What the model makes of one champion for this Account (spec #22: "explain this champion")."""
+
+    champion_id: int
+    status: ModelStatus
+    lines: tuple[ExplanationLine, ...]
+    assumptions: tuple[str, ...] = ()
+
+    def value(self, label: str) -> float | None:
+        return next((line.value for line in self.lines if line.label == label), None)
+
+
+@dataclass(frozen=True)
+class Reconstructed:
+    """What a reconstruction adds for one loadout, in the Scorer's vocabulary."""
+
+    effects: tuple[_Effect, ...] = ()
+    break_effects: tuple[_BreakEffect, ...] = ()
+    skips: Skips | None = None
+    armour_ablation: float = 0.0  # fraction of an Armoured chunk's health threshold it removes (0..1)
+    lines: tuple[ExplanationLine, ...] = ()
+    assumptions: tuple[tuple[str, str], ...] = ()  # (Run Goal or "*", Scoring Assumption)
+
+
+@dataclass(frozen=True)
+class Reconstruction:
+    """A champion's hand-built model of its unique effects (#40). `description_tests`: the test ids
+    that check it against the champion's description (kept passing by the suite; Model Status needs
+    them for Verified). `claims_keys` / `claims_effects`: effect keys and `effect_defines` ids it
+    models itself, taken out of the generic layer. `speed_keys`: keys whose presence in the
+    definitions means it can give area skips. Subclasses override `build`."""
+
+    description_tests: tuple[str, ...] = ()
+    claims_keys: frozenset[str] = frozenset()
+    claims_effects: frozenset[int] = frozenset()
+    speed_keys: frozenset[str] = frozenset()
+
+    def build(self, keys: tuple[AbilityKey, ...]) -> Reconstructed:
+        return Reconstructed()
+
+    def claims(self, key: AbilityKey) -> bool:
+        return key.key in self.claims_keys or (key.effect_id is not None and key.effect_id in self.claims_effects)
+
+
+# Champion id -> its reconstruction. Champions not listed are Not Modelled (generic effects only).
+# Filled from `advisor.reconstructions` at the end of this module.
+RECONSTRUCTIONS: dict[int, Reconstruction] = {}
 
 
 # Keys the generic layer understands, and the effect kind they change.
@@ -206,6 +298,9 @@ class ChampionModels:
         self._break_effects = cache(self._build_break_effects)
         self.break_ceiling = cache(self._build_break_ceiling)
         self._potion_effects = cache(self._build_potion_effects)
+        self._keys = cache(self._build_keys)
+        self._reconstructed = cache(self._build_reconstructed)
+        self.speed_possible = cache(self._build_speed_possible)
 
     # --- interface ---------------------------------------------------------------------------
 
@@ -217,6 +312,87 @@ class ChampionModels:
 
     def reconstruction(self, champion_id: int) -> Reconstruction | None:
         return RECONSTRUCTIONS.get(champion_id)
+
+    def reconstructed(self, champion_id: int, loadout: Loadout) -> Reconstructed:
+        """What the champion's reconstruction adds for this loadout (nothing when Not Modelled)."""
+        return self._reconstructed(champion_id, loadout)
+
+    def skips(self, champion_id: int, loadout: Loadout) -> Skips | None:
+        return self._reconstructed(champion_id, loadout).skips
+
+    def armour_ablation(self, champion_id: int, loadout: Loadout) -> float:
+        return self._reconstructed(champion_id, loadout).armour_ablation
+
+    def footprint(self, champion_id: int, loadout: Loadout) -> tuple:
+        """Everything the Scorer reads about one seat: equal footprints score the same everywhere."""
+        built = self._reconstructed(champion_id, loadout)
+        return (self.effects(champion_id, loadout), self.break_effects(champion_id, loadout), built.skips,
+                built.armour_ablation)
+
+    def default_loadout(self, champion_id: int) -> Loadout:
+        """The player's own choices: chosen specializations and equipped feats."""
+        owned = self.account.champions.get(champion_id)
+        if owned is None:
+            return Loadout()
+        return Loadout(tuple(sorted(owned.specialization_choices)), tuple(sorted(owned.equipped_feats)))
+
+    def explain(self, champion_id: int, loadout: Loadout | None = None) -> ChampionExplanation:
+        """The model's view of one champion for this Account (its own loadout by default): the
+        reconstruction's values, or the generic effects it is scored on."""
+        loadout = self.default_loadout(champion_id) if loadout is None else loadout
+        status = self.status(champion_id)
+        if self.reconstruction(champion_id) is not None:
+            built = self._reconstructed(champion_id, loadout)
+            return ChampionExplanation(champion_id, status, built.lines, tuple(a for _, a in built.assumptions))
+        lines = []
+        for effect in self.effects(champion_id, loadout):
+            pct = _pct(effect.log)
+            what = "gold found" if effect.kind == "gold" else "damage"
+            where = ", ".join(map(str, effect.targets))
+            lines.append(ExplanationLine(f"{what} ({where})", pct, f"+{pct:g}% {what} to {where}"))
+        return ChampionExplanation(champion_id, status, tuple(lines))
+
+    def ability_keys(self, champion_id: int, loadout: Loadout) -> tuple[AbilityKey, ...]:
+        """Every effect key the loadout has, with the buffs on its upgrade applied."""
+        return self._keys(champion_id, loadout)
+
+    def _build_keys(self, champion_id: int, loadout: Loadout) -> tuple[AbilityKey, ...]:
+        sources = self._sources(champion_id, loadout)
+        buffs = _buffs(sources)
+        return tuple(
+            AbilityKey(_key(effect), tuple(_params(effect)), fields, upgrade_id, effect_id,
+                       buffs.get(upgrade_id, 0.0) if upgrade_id is not None else 0.0)
+            for upgrade_id, effect_id, effect, fields in sources
+        )
+
+    def _build_reconstructed(self, champion_id: int, loadout: Loadout) -> Reconstructed:
+        reconstruction = RECONSTRUCTIONS.get(champion_id)
+        if reconstruction is None:
+            return Reconstructed()
+        return reconstruction.build(self.ability_keys(champion_id, loadout))
+
+    def _claimed(self, champion_id: int, upgrade_id: int | None, effect_id: int | None, effect: str) -> bool:
+        reconstruction = RECONSTRUCTIONS.get(champion_id)
+        return reconstruction is not None and reconstruction.claims(
+            AbilityKey(_key(effect), (), upgrade_id=upgrade_id, effect_id=effect_id)
+        )
+
+    def _build_speed_possible(self) -> bool:
+        """Can any champion in the definitions give area skips? Then Gem Farm is scored in gems per
+        hour already at placement (see `Scorer`). Decided on the definitions, not the roster, so a
+        one-change hint (an unowned Briv) is scored in the same units as the recommendation."""
+        for champion_id, reconstruction in RECONSTRUCTIONS.items():
+            if not reconstruction.speed_keys or self.catalogue.find(champion_id) is None:
+                continue
+            for upgrade in self.catalogue.upgrades_of(champion_id):
+                if _key(upgrade.effect) in reconstruction.speed_keys:
+                    return True
+                if _key(upgrade.effect) == "effect_def":
+                    ability = self.catalogue.effects.get(_int(_params(upgrade.effect), 0))
+                    keys = {_key(str(k.get("effect_string") or "")) for k in (ability.effect_keys if ability else ())}
+                    if keys & reconstruction.speed_keys:
+                        return True
+        return False
 
     def loadouts(self, champion_id: int) -> tuple[Loadout, ...]:
         """Every specialization combination × every useful feat set. Feats are only chosen among owned
@@ -254,7 +430,15 @@ class ChampionModels:
         growth = EVENT_HEALTH_GROWTH if campaign is not None and campaign.is_event else CORE_HEALTH_GROWTH
         return GemFarm(anchor or DEFAULT_GEM_FARM_ANCHOR, growth)
 
-    def assumptions(self, run_goal: str) -> tuple[str, ...]:
+    def assumptions(self, run_goal: str, seated: Iterable[Seat] = ()) -> tuple[str, ...]:
+        """The goal's Scoring Assumptions, then those of the seated reconstructed champions."""
+        own = tuple(dict.fromkeys(
+            text for seat in seated for goal, text in self.reconstructed(seat.champion_id, seat.loadout).assumptions
+            if goal in ("*", run_goal)
+        ))
+        return self._goal_assumptions(run_goal) + own
+
+    def _goal_assumptions(self, run_goal: str) -> tuple[str, ...]:
         common = (
             "All upgrades are bought; specializations and feats as recommended.",
             "Not Modelled champions are scored on their generic effects only (unique abilities, stacks and "
@@ -311,8 +495,10 @@ class ChampionModels:
 
     def _build_break_effects(self, champion_id: int, loadout: Loadout) -> tuple[_BreakEffect, ...]:
         found = []
-        for _, effect, fields in self._sources(champion_id, loadout):
+        for upgrade_id, effect_id, effect, fields in self._sources(champion_id, loadout):
             key = _key(effect)
+            if self._claimed(champion_id, upgrade_id, effect_id, effect):
+                continue
             if key not in _BREAK_EXTRA_KEYS and key not in _BREAK_MULT_KEYS:
                 continue
             if _COMPLEX_FIELDS & set(fields):
@@ -331,7 +517,7 @@ class ChampionModels:
                 found.append(_BreakEffect("mult", amount, _BREAK_MULT_KEYS[key], targets))
             else:
                 found.append(_BreakEffect("extra", amount, _BREAK_EXTRA_KEYS[key], targets))
-        return tuple(found)
+        return (*found, *self._reconstructed(champion_id, loadout).break_effects)
 
     def _build_break_ceiling(self, kind: str) -> tuple[float, float]:
         """(most extra segments per hit, largest hit multiplier) any formation of owned champions could
@@ -365,48 +551,41 @@ class ChampionModels:
         feat = self.catalogue.feats.get(feat_id)
         return bool(feat and any(_key(e) in _DAMAGE_KEYS or _key(e) in _GOLD_KEYS for e in feat.effects))
 
-    def _sources(self, champion_id: int, loadout: Loadout) -> list[tuple[int | None, str, Mapping]]:
-        """(upgrade id, effect string, effect-key fields) of every effect the loadout has."""
-        sources: list[tuple[int | None, str, Mapping]] = []
+    def _sources(self, champion_id: int, loadout: Loadout) -> list[tuple[int | None, int | None, str, Mapping]]:
+        """(upgrade id, effect id, effect string, effect-key fields) of every effect the loadout has."""
+        sources: list[tuple[int | None, int | None, str, Mapping]] = []
         chosen = set(loadout.specializations)
         for upgrade in self.catalogue.upgrades_of(champion_id):
             if upgrade.is_specialization and upgrade.id not in chosen:
                 continue
             if _key(upgrade.effect) == "effect_def":
-                ability = self.catalogue.effects.get(_int(_params(upgrade.effect), 0))
+                effect_id = _int(_params(upgrade.effect), 0)
+                ability = self.catalogue.effects.get(effect_id)
                 for key in ability.effect_keys if ability else ():
-                    sources.append((upgrade.id, str(key.get("effect_string") or ""), key))
+                    sources.append((upgrade.id, effect_id, str(key.get("effect_string") or ""), key))
             else:
-                sources.append((upgrade.id, upgrade.effect, {}))
+                sources.append((upgrade.id, None, upgrade.effect, {}))
         owned = self.account.champions.get(champion_id)
         for slot, gear in (owned.gear if owned else {}).items():
             item = self.catalogue.gear_item(champion_id, slot, gear.rarity)
             scale = _GILD_FACTOR.get(gear.gild, 1.0) * (1 + (gear.level - 1) / 250)
             for effect in item.effects if item else ():
-                sources.append((None, _scaled(effect, scale), {}))
+                sources.append((None, None, _scaled(effect, scale), {}))
         for feat_id in loadout.feats:
             feat = self.catalogue.feats.get(feat_id)
             for effect in feat.effects if feat else ():
-                sources.append((None, effect, {}))
+                sources.append((None, None, effect, {}))
         return sources
 
     def _build_effects(self, champion_id: int, loadout: Loadout) -> tuple[_Effect, ...]:
         sources = self._sources(champion_id, loadout)
-        buffs: dict[int, float] = defaultdict(float)  # upgrade id -> % added to its effect
-        for _, effect, _fields in sources:
-            if _key(effect) in _BUFF_KEYS:
-                params = _params(effect)
-                pct = _float(params, 0)
-                for upgrade_id in params[1:]:
-                    if (u := _maybe_int(upgrade_id)) is not None and pct is not None:
-                        buffs[u] += pct
-
+        buffs = _buffs(sources)
         effects = []
-        for upgrade_id, effect, fields in sources:
+        for upgrade_id, effect_id, effect, fields in sources:
             key = _key(effect)
             if key not in _DAMAGE_KEYS and key not in _GOLD_KEYS:
                 continue  # buffs were applied above; neutral and unknown keys change no score here
-            if _COMPLEX_FIELDS & set(fields):
+            if _COMPLEX_FIELDS & set(fields) or self._claimed(champion_id, upgrade_id, effect_id, effect):
                 continue
             params = _params(effect)
             pct = _float(params, 0)
@@ -417,7 +596,20 @@ class ChampionModels:
             if targets is None:
                 continue
             effects.append(_Effect("gold" if key in _GOLD_KEYS else "damage", math.log(max(1e-9, 1 + pct / 100)), targets))
-        return tuple(effects)
+        return (*effects, *self._reconstructed(champion_id, loadout).effects)
+
+
+def _buffs(sources) -> dict[int, float]:
+    """Upgrade id -> % its effect is raised by (`buff_upgrade(s)`; the game applies them post stack)."""
+    buffs: dict[int, float] = defaultdict(float)
+    for _, _, effect, _fields in sources:
+        if _key(effect) in _BUFF_KEYS:
+            params = _params(effect)
+            pct = _float(params, 0)
+            for upgrade_id in params[1:]:
+                if (u := _maybe_int(upgrade_id)) is not None and pct is not None:
+                    buffs[u] += pct
+    return buffs
 
 
 class Scorer:
@@ -428,6 +620,13 @@ class Scorer:
     damage into gems per hour; `lift(value, setup)` does the same for any placement score (it is
     increasing in `value` and ignores which slots hold the familiars, so it lifts bounds too). Familiars
     and cores don't change the Push and Gold Farm scores.
+
+    Gem Farm with area skips (`speed_mode`, when any champion in the definitions can skip areas): gems
+    per hour then depend on the skips as well as the damage, so the placement score is already log gems
+    per hour with no familiars, and `lift` adds the most familiars can gain (an upper bound, exact when
+    no familiars are owned). Bounds stay honest because log gems per hour never rises faster than log
+    damage (each ×e of damage makes every slow area at most e× quicker), and skips divide the time per
+    area by at most the profile's largest speed-up (`_skip_speedup`).
     """
 
     def __init__(
@@ -440,12 +639,18 @@ class Scorer:
         self.main_dps = main_dps
         self.breaking = breaking
         self.gem_farm = gem_farm
+        self.speed_mode = gem_farm is not None and models.speed_possible()
         self._damage_weight = GOLD_PER_DAMAGE_EXPONENT if run_goal == "Gold Farm" else 1.0
         self._gold_weight = 1.0 if run_goal == "Gold Farm" else 0.0
         self._bounds: dict[Seat, float] = {}
-        self._last: tuple[tuple[Seat, ...], FormationScore] | None = None
+        self._last: tuple[tuple[Seat, ...], FormationScore, float, Skips | None] | None = None
+        # The Main DPS's own "per matching champion" stacks (e.g. Kas per Evil champion).
+        self._main_per = tuple(e for e in models.effects(main_dps.champion_id, main_dps.loadout) if e.per)
 
     def lift(self, value: float, setup=None) -> float:
+        if self.speed_mode and setup is not None:
+            on_field = sum(1 for f in setup.familiars if f is not None)
+            return value + _familiar_speedup(on_field, len(setup.familiars) - on_field)
         return self._lift(value, setup)[0]
 
     def _lift(self, value: float, setup) -> tuple[float, int | None]:
@@ -458,18 +663,23 @@ class Scorer:
     def score(self, seats: Iterable[Seat], setup=None) -> FormationScore:
         seats = tuple(seats)
         if setup is None:
-            return self._score(seats)
+            return self._placement(seats)[0]
         if self._last is None or self._last[0] != seats:  # setups are tried in turn on the same seats
-            self._last = (seats, self._score(seats))
-        placement = self._last[1]
-        value, reset_area = self._lift(placement.value, setup)
+            self._last = (seats, *self._placement(seats))
+        _, placement, multiplier, skips = self._last
+        if self.speed_mode:
+            on_field = sum(1 for f in setup.familiars if f is not None)
+            value, reset_area = self.gem_farm.rate(multiplier, on_field, len(setup.familiars) - on_field, skips)
+        else:
+            value, reset_area = self._lift(placement.value, setup)
         return FormationScore(value, placement.bud, placement.contributions, reset_area)
 
-    def _score(self, seats: Iterable[Seat]) -> FormationScore:
-        seats = tuple(seats)
+    def _placement(self, seats: tuple[Seat, ...]) -> tuple[FormationScore, float, Skips | None]:
+        """(placement score, log of the Main DPS's damage multiplier, the skips in play)."""
         if self.main_dps not in seats:
             seats = (self.main_dps, *seats)
-        damage_log = math.log(self.models.base_damage(self.main_dps.champion_id))
+        base = math.log(self.models.base_damage(self.main_dps.champion_id))
+        damage_log = base
         gold_log = 0.0
         for effect in self.models.potion_effects():
             damage_log += effect.log if effect.kind == "damage" else 0.0
@@ -477,16 +687,31 @@ class Scorer:
         contributions = {}
         for seat in seats:
             damage, gold = self._reach(seat)
+            damage += self._per_matches(seat)
             damage_log += damage
             gold_log += gold
             contributions[seat.champion_id] = Contribution(_pct(damage), _pct(gold))
+        bud = math.exp(min(damage_log, 700))
+        skips = _best_skips(self.models.skips(s.champion_id, s.loadout) for s in seats) if self.speed_mode else None
+        if self.speed_mode:
+            value, reset_area = self.gem_farm.rate(damage_log - base, 0, 0, skips)
+            return FormationScore(value, bud, contributions, reset_area), damage_log - base, skips
         value = self._damage_weight * damage_log + self._gold_weight * gold_log
         if self.breaking:
             rates = {kind: self.breaking_rate(seats, kind) for kind in {n.kind for n in self.breaking}}
             value += BREAKING_WEIGHT * sum(
                 min(0.0, math.log(rates[n.kind] * BREAK_TIME_S / n.segments)) for n in self.breaking
             )
-        return FormationScore(value=value, bud=math.exp(min(damage_log, 700)), contributions=contributions)
+        return FormationScore(value=value, bud=bud, contributions=contributions), damage_log - base, skips
+
+    def armour_ablation(self, seats: Iterable[Seat]) -> float:
+        """Fraction of an Armoured chunk's health threshold the formation's ablation removes (stacking
+        multiplicatively between champions)."""
+        seats = tuple(seats)
+        if self.main_dps not in seats:
+            seats = (self.main_dps, *seats)
+        kept = math.prod(1 - min(0.99, self.models.armour_ablation(s.champion_id, s.loadout)) for s in seats)
+        return 1 - kept
 
     def breaking_rate(
         self, seats: Iterable[Seat], kind: str, *, main_qualifies: bool = True, ult_min_modifier: float | None = None
@@ -495,14 +720,14 @@ class Scorer:
 
         Hits-based: every champion's hits count. Armoured: only hits at or above the chunk's health
         count: the Main DPS's (when `main_qualifies`) and ultimates whose damage per hit is at least
-        `ult_min_modifier` × BUD (None: every ultimate). Generic Breaker effects reaching a champion
-        add segments per hit or multiply its hits."""
+        `ult_min_modifier` × BUD (None: every ultimate). Breaker effects (generic or reconstructed)
+        reaching a champion add segments per hit or multiply its hits."""
         seats = tuple(seats)
         if self.main_dps not in seats:
             seats = (self.main_dps, *seats)
         effects = [
             (seat, e) for seat in seats for e in self.models.break_effects(seat.champion_id, seat.loadout)
-            if kind in e.kinds
+            if kind in e.kinds and _placed(self.slots, e.where, seat)
         ]
         rate = 0.0
         for seat in seats:
@@ -524,17 +749,27 @@ class Scorer:
         return rate
 
     def bound(self, seat: Seat) -> float:
-        """Generic effects are separable: a seat adds exactly its own reach, so the bound is exact."""
+        """Never below what the seat adds to any formation with this Main DPS. Damage and gold effects
+        are separable (a seat adds its own reach, plus the Main DPS's per-match stacks it matches), so
+        that part is exact; breaking and skips add their own optimistic terms."""
         if seat not in self._bounds:
             damage, gold = self._reach(seat)
-            self._bounds[seat] = self._damage_weight * damage + self._gold_weight * gold + self._breaking_bound(seat)
+            damage += self._per_matches(seat)
+            if self.speed_mode:
+                skips = self.models.skips(seat.champion_id, seat.loadout)
+                self._bounds[seat] = max(0.0, damage) + (_skip_speedup(skips) if skips else 0.0)
+            else:
+                self._bounds[seat] = (
+                    self._damage_weight * damage + self._gold_weight * gold + self._breaking_bound(seat)
+                )
         return self._bounds[seat]
 
     def _breaking_bound(self, seat: Seat) -> float:
         """Most a seat can lift the breaking penalty. Each need's term is min(0, log rate), and adding a
         seat multiplies the rate by at most (1 + its own hits at the best possible extras and
         multipliers ÷ the Main DPS's bare hits) × (1 + each extra it gives) × (each multiplier it gives),
-        and never by more than the Main DPS alone falls short."""
+        and never by more than the Main DPS alone falls short. Positional conditions (`where`) are
+        ignored here, which only over-estimates."""
         if not self.breaking:
             return 0.0
         floor = self.models.hit_rates(self.main_dps.champion_id)[0]
@@ -554,17 +789,50 @@ class Scorer:
         return total
 
     def _reach(self, seat: Seat) -> tuple[float, float]:
-        """Log damage multiplier this seat gives the Main DPS, and log gold multiplier."""
+        """Log damage multiplier this seat's own effects give the Main DPS, and log gold multiplier."""
         damage = gold = 0.0
         for effect in self.models.effects(seat.champion_id, seat.loadout):
+            if effect.per:
+                continue  # counted through the Main DPS (`_per_matches`)
             if effect.kind == "gold":
                 gold += effect.log
             elif self._reaches(effect.targets, seat):
                 damage += effect.log
         return damage, gold
 
+    def _per_matches(self, seat: Seat) -> float:
+        """Log damage the Main DPS's per-match stacks gain from this seat matching them."""
+        if not self._main_per:
+            return 0.0
+        champion = self.models.catalogue.find(seat.champion_id)
+        return sum(e.log for e in self._main_per if e.kind == "damage" and _matches(champion, e.per))
+
     def _reaches(self, targets: tuple, source: Seat) -> bool:
         return _lands(self.slots, targets, source, self.main_dps)
+
+
+def _matches(champion, per: tuple[str, str]) -> bool:
+    kind, value = per
+    return champion is not None and kind == "tag" and value in champion.tags
+
+
+def _placed(slots: Mapping[int, Slot], where: str | None, source: Seat) -> bool:
+    """Is the effect's owner where its condition needs it?"""
+    if where is None:
+        return True
+    slot = slots.get(source.slot)
+    if slot is None or not slots:
+        return False
+    if where == "middle_columns":
+        columns = [s.column for s in slots.values()]
+        return min(columns) < slot.column < max(columns)
+    return False
+
+
+def _best_skips(found: Iterable[Skips | None]) -> Skips | None:
+    """The formation's skips: only one skip source counts (the one that speeds runs up most)."""
+    found = [s for s in found if s is not None]
+    return max(found, key=_skip_speedup) if found else None
 
 
 def _lands(slots: Mapping[int, Slot], targets: tuple, source: Seat, dest: Seat, dest_is_main: bool = True) -> bool:
@@ -606,26 +874,67 @@ class GemFarm:
     anchor: float  # area where the Main DPS alone stops killing at once
     growth: float  # monster health per area
 
-    def rate(self, damage_log: float, on_field: int, clicks: int) -> tuple[float, int]:
-        """(log gems per hour, best reset area) for a formation multiplying the Main DPS by e^damage_log."""
-        return _gem_rate(round(self.anchor + damage_log / math.log(self.growth), 9), self.growth, on_field, clicks)
+    def rate(self, damage_log: float, on_field: int, clicks: int, skips: Skips | None = None) -> tuple[float, int]:
+        """(log gems per hour, best reset area) for a formation multiplying the Main DPS by e^damage_log,
+        with these area skips in play."""
+        return _gem_rate(round(self.anchor + damage_log / math.log(self.growth), 9), self.growth, on_field, clicks, skips)
 
 
 @cache
-def _gem_rate(one_shot: float, growth: float, on_field: int, clicks: int) -> tuple[float, int]:
-    overhead = RESET_SECONDS + STACKING_SECONDS + max(0.0, RAMP_SECONDS - FIELD_FAMILIAR_SECONDS * on_field)
+def _gem_rate(one_shot: float, growth: float, on_field: int, clicks: int, skips: Skips | None = None) -> tuple[float, int]:
+    stacking = SKIP_STACKING_SECONDS if skips else STACKING_SECONDS
+    overhead = RESET_SECONDS + stacking + max(0.0, RAMP_SECONDS - FIELD_FAMILIAR_SECONDS * on_field)
     kill = KILL_SECONDS / (1 + CLICK_FAMILIAR_SHARE * clicks)
+    played = skip_landings(skips) if skips else None
     log_g = math.log(growth)
     last = min(MAX_RESET_AREA, max(5, 5 * math.ceil((one_shot + 60) / 5)))
     best = (-math.inf, 5)
     for reset in range(5, last + 1, 5):
         # Σ_{a=1..R} g^(a − one_shot), as a geometric sum.
         slow = (math.exp((reset + 1 - one_shot) * log_g) - math.exp((1 - one_shot) * log_g)) / (growth - 1)
-        seconds = overhead + reset * AREA_SECONDS + kill * slow
+        # With skips only the areas landed on are played (slow ones in the same share as all of them).
+        walked = played[reset] if played else reset
+        seconds = overhead + walked * AREA_SECONDS + kill * slow * (walked / reset)
         value = math.log(3600 * GEMS_PER_BOSS * (reset // 5) / seconds)
         if value > best[0] + 1e-12:
             best = (value, reset)
     return best
+
+
+@cache
+def skip_landings(skips: Skips) -> tuple[float, ...]:
+    """Expected areas played in a run to each reset area R (index R), by Monte-Carlo: from area 1,
+    after each area played roll `chance` to jump `areas` areas ahead (land `areas + 1` further), else
+    walk to the next one; the run ends on reaching R. MONTE_CARLO_RUNS runs with a fixed seed."""
+    rng = random.Random(_MONTE_CARLO_SEED)
+    top = MAX_RESET_AREA + 1
+    landed = [0] * (top + 1)
+    for _ in range(MONTE_CARLO_RUNS):
+        area = 1
+        while area < top:
+            landed[area] += 1
+            area += skips.areas + 1 if rng.random() < skips.chance else 1
+    played, below = [0.0] * (top + 1), 0
+    for reset in range(1, top + 1):
+        played[reset] = below / MONTE_CARLO_RUNS + 1  # landings below R, plus the one that reaches R
+        below += landed[reset]
+    return tuple(played)
+
+
+@cache
+def _skip_speedup(skips: Skips) -> float:
+    """Log of the most a skip profile divides a run's time by: max over reset areas of areas ÷ areas
+    played (stacking time only adds, so gems per hour rise by at most this)."""
+    played = skip_landings(skips)
+    return math.log(max(reset / played[reset] for reset in range(5, MAX_RESET_AREA + 1, 5)))
+
+
+def _familiar_speedup(on_field: int, clicks: int) -> float:
+    """Log of the most familiars can raise gems per hour over none: they shorten the ramp (overhead
+    without stacking time is the smallest, so the ratio largest) and the kill time."""
+    bare = RESET_SECONDS + STACKING_SECONDS + RAMP_SECONDS
+    helped = RESET_SECONDS + STACKING_SECONDS + max(0.0, RAMP_SECONDS - FIELD_FAMILIAR_SECONDS * on_field)
+    return math.log(bare / helped) + math.log1p(CLICK_FAMILIAR_SHARE * clicks)
 
 
 def _pct(log: float) -> float:
@@ -682,3 +991,10 @@ def _targets(key: str, params: list[str], fields: Mapping) -> tuple | None:
     if not all(isinstance(t, str) and t in _TARGETS for t in raw):
         return None
     return tuple(raw)
+
+
+# The reconstruction batches register themselves here (they import this module's vocabulary).
+from advisor.reconstructions import BATCHES  # noqa: E402
+
+for _batch in BATCHES:
+    RECONSTRUCTIONS.update(_batch)

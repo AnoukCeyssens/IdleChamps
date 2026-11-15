@@ -269,7 +269,7 @@ def recommend(
         score_label=label,
         gap_pct=result.gap_pct,
         exact=result.exact or exact_solve == "proven",
-        scoring_assumptions=models.assumptions(run_goal) + (verdict.assumptions if verdict else ()),
+        scoring_assumptions=models.assumptions(run_goal, result.seats) + (verdict.assumptions if verdict else ()),
         unverified_champions=unverified,
         left_out=tuple(sorted(left_out, key=lambda l: (l.champion.seat, l.champion.id))),
         familiars=familiars,
