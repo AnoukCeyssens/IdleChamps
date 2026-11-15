@@ -119,6 +119,13 @@ class Recompute:
                 self._fresh.setdefault(key, result)
         return result, False
 
+    def put(self, adventure: Adventure, goal: str, patron: int | None, result: FormationRecommendation) -> None:
+        """Replace one result for the current data (e.g. the exact solve's); a recompute
+        still running keeps it rather than overwrite it."""
+        with self._lock:
+            self._fresh[(adventure.id, goal, patron)] = result
+            self._old.pop((adventure.id, goal, patron), None)
+
     def progress(self) -> Progress:
         with self._lock:
             return Progress(self._pool is not None, self._done, self._total, self._completed)
@@ -155,7 +162,8 @@ class Recompute:
         with self._lock:
             if run != self._run:
                 return
-            self._fresh.update(results)
+            for key, result in results:
+                self._fresh.setdefault(key, result)  # keep what was computed on demand or put meanwhile
             self._done += 1
             if self._done < self._total:
                 return

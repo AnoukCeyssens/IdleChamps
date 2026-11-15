@@ -42,10 +42,24 @@ class Champion:
     age: int | None = None
     date_available: str = ""  # "YYYY-MM-DD hh:mm:ss"
     last_rework_date: str = ""
+    base_attack_id: int | None = None
 
     @property
     def role_tags(self) -> tuple[str, ...]:
         return tuple(t for t in ROLE_TAGS if t in self.tags)
+
+
+@dataclass(frozen=True)
+class HealthCurve:
+    """Monster health per area (`monster_base_stats`): a normal monster at area 1 has `base_health`,
+    and each later area multiplies it by the growth rate in force there."""
+
+    base_health: float
+    growth: tuple[tuple[int, float], ...]  # (from area, multiplier per area), ascending
+
+
+# The game rule's values (research/push-area-reach.md §1.1), used when `game_rule_defines` isn't loaded.
+CORE_HEALTH_CURVE = HealthCurve(10.0, ((1, 2.031), (2001, 3.031), (2251, 4.531)))
 
 
 @dataclass(frozen=True)
@@ -56,6 +70,7 @@ class Campaign:
     name: str
     event_id: int | None = None  # set on event campaigns
     favor_name: str | None = None  # the reset currency (Favor) earned here, e.g. "Torm's Favor"
+    health_curve: HealthCurve | None = None  # the campaign's `monster_base_stats` override, if any
 
     @property
     def is_event(self) -> bool:
@@ -111,6 +126,8 @@ class Adventure:
     champion_id: int | None = None  # the event champion whose adventure this is, if any
     restrictions: tuple[Restriction, ...] = ()
     forced: tuple[ForcedChampion, ...] = ()
+    # The adventure's own `game_changes` (modifiers), as sent; read by `advisor.push_verdict`.
+    game_changes: tuple = field(default=(), hash=False, compare=False)
 
     @property
     def is_variant(self) -> bool:
@@ -203,6 +220,10 @@ class Catalogue:
     # Upgrades and abilities by id; only those whose definitions have been loaded.
     upgrades: Mapping[int, Upgrade] = field(default_factory=dict)
     effects: Mapping[int, EffectDefinition] = field(default_factory=dict)
+    # Monster health per area outside campaign overrides (rule `monster_base_stats`).
+    health_curve: HealthCurve = CORE_HEALTH_CURVE
+    # Attack cooldowns in seconds by attack id; only those whose attack definitions have been loaded.
+    attack_cooldowns: Mapping[int, float] = field(default_factory=dict)
 
     def upgrades_of(self, champion_id: int) -> tuple[Upgrade, ...]:
         return tuple(sorted((u for u in self.upgrades.values() if u.champion_id == champion_id), key=lambda u: u.id))
@@ -265,7 +286,43 @@ def parse_catalogue(raw: RawResponses) -> Catalogue:
             for _, a in sorted(adventure_defines.items())
         ),
         patrons={**_PATRONS, **{p.id: p for p in map(_patron, _table(raw, "patron_defines"))}},
+        health_curve=_rule_health_curve(_table(raw, "game_rule_defines")) or CORE_HEALTH_CURVE,
+        attack_cooldowns={
+            int(a["id"]): float(a["cooldown"]) for a in _table(raw, "attack_defines") if _number(a.get("cooldown"))
+        },
     )
+
+
+def _number(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _health_curve(stats: dict, fallback: HealthCurve | None = None) -> HealthCurve | None:
+    """A `monster_base_stats` block as a curve; missing fields come from `fallback` (the core curve)."""
+    curve = stats.get("health_growth_rate_curve")
+    if isinstance(curve, dict):
+        growth = tuple(sorted((int(k), float(v)) for k, v in curve.items() if _number(v)))
+    elif _number(stats.get("health_growth_rate")):
+        growth = ((1, float(stats["health_growth_rate"])),)
+    else:
+        growth = ()
+    base = _number(stats.get("base_health"))
+    if not growth and base is None:
+        return None
+    fallback = fallback or CORE_HEALTH_CURVE
+    return HealthCurve(base or fallback.base_health, growth or fallback.growth)
+
+
+def _rule_health_curve(rules: list[dict]) -> HealthCurve | None:
+    """`game_rule_defines` row `monster_base_stats` (its fields inline or under `value`)."""
+    for rule in rules:
+        if "monster_base_stats" in (rule.get("key"), rule.get("name"), rule.get("rule")):
+            value = rule.get("value") if isinstance(rule.get("value"), dict) else rule
+            return _health_curve(value)
+    return None
 
 
 # Patron names, used when `patron_defines` isn't among the recorded definitions.
@@ -299,6 +356,10 @@ def _campaign(define: dict, favor_names: Mapping[int, str] | None = None) -> Cam
         name=define["name"],
         event_id=int(event_id) if event_id is not None else None,
         favor_name=(favor_names or {}).get(int(currency)) if currency else None,
+        health_curve=next(
+            (_health_curve(g) for g in define.get("game_changes") or () if g.get("type") == "monster_base_stats"),
+            None,
+        ),
     )
 
 
@@ -388,6 +449,7 @@ def _adventure(
         champion_id=champion_of.get(adventure_id) or champion_of.get(base_id),
         restrictions=_restrictions(define.get("game_changes")),
         forced=_forced(define.get("game_changes")),
+        game_changes=tuple(define.get("game_changes") or ()),
     )
 
 
@@ -547,6 +609,7 @@ def _champion(hero: dict) -> Champion:
         age=int(age) if isinstance(age, (int, float)) or str(age).isdigit() else None,
         date_available=str(hero.get("date_available") or ""),
         last_rework_date=str(hero.get("last_rework_date") or ""),
+        base_attack_id=int(hero["base_attack_id"]) if hero.get("base_attack_id") else None,
     )
 
 

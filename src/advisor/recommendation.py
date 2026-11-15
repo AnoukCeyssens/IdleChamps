@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from advisor.account import Account
 from advisor.catalogue import Adventure, Catalogue, Champion, Feat, Patron, Restriction, SpecializationOption
 from advisor.champion_models import ChampionModels, Contribution, ModelStatus, Seat
-from advisor.formation_search import Candidate, SearchProblem, exhaustive_search, search
+from advisor.formation_search import EXACT_TIME_LIMIT_S, Candidate, SearchProblem, exact_search, exhaustive_search, search
+from advisor.push_verdict import PushVerdict, push_verdict
 from advisor.restrictions import describe, failed
 
 RUN_GOAL_METRICS = {"Push": "Main DPS damage", "Gem Farm": "Main DPS damage", "Gold Farm": "Favor per hour"}
@@ -67,7 +68,10 @@ class FormationRecommendation:
     modron: object | None = None
     hints: tuple = ()
     comparisons: tuple = ()
-    push_verdict: object | None = None
+    push_verdict: PushVerdict | None = None  # Push only
+    # "Prove it's the best" (#31): None until run; "improved" (a better formation replaced the fast
+    # one), "proven" (the shown formation is the best possible) or "timed_out" (gap_pct remains).
+    exact_solve: str | None = None
 
 
 def recommend(
@@ -78,8 +82,9 @@ def recommend(
     patron: int | None = None,
     *,
     models: ChampionModels | None = None,
-    solver: str = "fast",  # "fast" (assignment + local search) or "exhaustive" (tiny instances only)
+    solver: str = "fast",  # "fast" (assignment + local search), "exact" (fast, then CP-SAT) or "exhaustive" (tiny instances only)
     budget_s: float = 0.1,
+    exact_time_s: float = EXACT_TIME_LIMIT_S,
 ) -> FormationRecommendation:
     models = models or ChampionModels(catalogue, account)
     patron_obj = catalogue.patron(patron) if patron is not None else None
@@ -90,9 +95,10 @@ def recommend(
     )
 
     def infeasible(reason: str, left_out=()) -> FormationRecommendation:
+        verdict = push_verdict(catalogue, account, models, adventure, patron, (), None) if run_goal == "Push" else None
         return FormationRecommendation(
             adventure, run_goal, patron_obj, None, _empty_seats(adventure), None, label, None, False,
-            models.assumptions(run_goal), (), tuple(left_out), infeasible_reason=reason,
+            models.assumptions(run_goal), (), tuple(left_out), infeasible_reason=reason, push_verdict=verdict,
         )
 
     if not adventure.layout:
@@ -135,6 +141,11 @@ def recommend(
         return models.scorer(adventure.layout, run_goal, main)
 
     result = (exhaustive_search if solver == "exhaustive" else _fast(budget_s))(problem, scorer_for)
+    exact_solve = None
+    if solver == "exact" and result is not None:
+        fast = result
+        result = exact_search(problem, scorer_for, exact_time_s, incumbent=fast)
+        exact_solve = "improved" if result.exact else "proven" if result.gap_pct == 0 else "timed_out"
     if result is None:
         return infeasible("No legal formation: the champions this adventure forces in don't fit its free slots.", left_out)
 
@@ -197,6 +208,10 @@ def recommend(
         catalogue.champion(i) for i in sorted(seated, key=lambda i: catalogue.champion(i).seat)
         if models.status(i) is not ModelStatus.VERIFIED
     )
+    verdict = (
+        push_verdict(catalogue, account, models, adventure, patron, result.seats, result.main_dps)
+        if run_goal == "Push" else None
+    )
     return FormationRecommendation(
         adventure=adventure,
         run_goal=run_goal,
@@ -206,10 +221,12 @@ def recommend(
         score=math.exp(min(result.score.value, 700)),
         score_label=label,
         gap_pct=result.gap_pct,
-        exact=result.exact,
-        scoring_assumptions=models.assumptions(run_goal),
+        exact=result.exact or exact_solve == "proven",
+        scoring_assumptions=models.assumptions(run_goal) + (verdict.assumptions if verdict else ()),
         unverified_champions=unverified,
         left_out=tuple(sorted(left_out, key=lambda l: (l.champion.seat, l.champion.id))),
+        exact_solve=exact_solve,
+        push_verdict=verdict,
     )
 
 

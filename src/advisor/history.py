@@ -11,8 +11,10 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from advisor.account import parse_account
-from advisor.catalogue import _table
+from advisor.account import Account, parse_account
+from advisor.catalogue import _table, parse_catalogue
+from advisor.champion_models import ChampionModels
+from advisor.push_verdict import instance_estimate
 from advisor.request_log import RawResponses
 from advisor.store import Store
 
@@ -61,6 +63,9 @@ def history_record(
         "instances": [_instance(i, server_time) for i in details.get("game_instances") or ()],
         "recommendation_key": account.recommendation_key,
     }
+    estimates = _push_estimates(raw, account)
+    for instance in record["instances"]:
+        instance["push_estimate"] = estimates.get(instance["game_instance_id"])
     if previous is None or previous.get("recommendation_key") != record["recommendation_key"]:
         record["owned_state"] = account.owned_state()
     return record
@@ -104,8 +109,30 @@ def _instance(instance: dict, server_time: int | None) -> dict[str, Any]:
         "top_damage_champion_id": _int(stats.get("this_reset_highest_damage_dealt_hero_id")),
         "resets_since_last_manual": _int((instance.get("auto_reset_stats") or {}).get("resets_since_last_manual")),
         "formation": [_int(c) for c in instance.get("formation") or ()],  # champion id per slot, -1 empty
-        "push_estimate": None,  # the Push Verdict estimate made for this run, once Push exists
+        "push_estimate": None,  # the Push estimate for the formation in play, filled by `_push_estimates`
     }
+
+
+def _push_estimates(raw: RawResponses, account: Account) -> dict[int, dict[str, Any]]:
+    """The Push estimate for each running instance's formation in play, by instance id (none when an
+    instance can't be estimated, e.g. no BUD or an unhandled adventure modifier)."""
+    try:
+        catalogue = parse_catalogue(raw)
+    except (KeyError, TypeError, ValueError):
+        return {}
+    models = ChampionModels(catalogue, account)
+    estimates = {}
+    for instance in account.instances:
+        verdict = instance_estimate(catalogue, account, models, instance)
+        if verdict is not None:
+            estimates[instance.id] = {
+                "expected_area": verdict.expected_area,
+                "area": verdict.area,
+                "band": verdict.band,
+                "objective": verdict.objective,
+                "verdict": verdict.label,
+            }
+    return estimates
 
 
 def _game_version(raw: RawResponses) -> str | None:

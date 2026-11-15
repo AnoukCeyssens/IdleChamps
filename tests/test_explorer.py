@@ -190,7 +190,8 @@ def test_seat_grid_draws_the_real_layout_with_adjacency_and_front(explorer):
     seats = rows(page, "seat")
     assert len(seats) == 9
     # Only slot 0 sits in the front column.
-    assert [s["text"] for s in seats if "front" in s["classes"]] == ["Slot 0 Slot 0 · empty"]
+    front = [s["text"] for s in seats if "front" in s["classes"]]
+    assert len(front) == 1 and front[0].startswith("Slot 0 ")
     # The Diamond's adjacency lists hold 16 distinct pairs.
     assert len(rows(page, "adjacency")) == 16
     assert len(rows(page, "front-marker")) == 1

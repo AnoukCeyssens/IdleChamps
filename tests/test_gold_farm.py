@@ -146,4 +146,4 @@ def test_no_legal_formation_shows_the_missing_piece(tmp_path_factory):
 
 
 def test_other_run_goals_do_not_show_a_recommendation_yet(client):
-    assert rows(client.get("/adventures/7?goal=Push").text, "main-dps") == []
+    assert rows(client.get("/adventures/7?goal=Gem%20Farm").text, "main-dps") == []
