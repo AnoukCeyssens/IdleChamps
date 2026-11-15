@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import time
 from dataclasses import replace
 from collections.abc import Callable
@@ -16,7 +18,8 @@ from fastapi.templating import Jinja2Templates
 from advisor.account import Account, parse_account
 from advisor.area_sets import merge as merge_area_sets
 from advisor.catalogue import GEAR_SLOTS, ROLE_TAGS, Catalogue, parse_catalogue
-from advisor.champion_models import ChampionModels
+from advisor import model_status
+from advisor.champion_models import ChampionModels, ModelStatus
 from advisor.champion_usage import champion_steps, seated_in
 from advisor.explorer import RUN_GOALS, adventure_node, is_running, tree
 from advisor.hints import hints as one_change_hints
@@ -56,12 +59,14 @@ def create_app(
     models = ChampionModels(catalogue, account)
     results = recompute or Recompute(_RECOMMENDED_GOALS)
     hints: dict[tuple, tuple] = {}  # "What would make this better", computed when a recommendation is opened
+    ledger = model_status.from_json(store.load_model_status()) if store is not None else model_status.Ledger()
+    checks: tuple[model_status.DamageCheck, ...] = ()  # the live damage checks on the shown snapshot
     focus = focus or FocusSets()  # Next Steps' Focus Sets (#35)
     steps = steps or Steps()  # each Focus adventure's measured one-changes
 
     def load(responses: RawResponses, *, refreshed: bool = True) -> None:
         """(Re)build everything the pages show from raw responses (at start and after a Refresh)."""
-        nonlocal raw, catalogue, account, models
+        nonlocal raw, catalogue, account, models, ledger, checks
         if "getdefinitions" not in responses or "getuserdetails" not in responses:
             return  # live mode before the first Refresh: nothing to show yet
         raw = responses
@@ -71,7 +76,14 @@ def create_app(
             store.save_area_sets(cache)
             catalogue = replace(catalogue, area_sets=cache)
         account = parse_account(raw)
-        models = ChampionModels(catalogue, account)
+        checks = model_status.damage_checks(catalogue, account, ChampionModels(catalogue, account))
+        ledger = model_status.advance(ledger, catalogue, account, checks)
+        if store is not None:
+            try:
+                store.save_model_status(model_status.to_json(ledger))
+            except OSError:
+                pass  # kept in memory; the next Refresh saves it
+        models = ChampionModels(catalogue, account, statuses=ledger.statuses())
         results.update(raw, catalogue, account, models, precompute=refreshed)
         hints.clear()
         steps.update(raw, account)
@@ -96,14 +108,56 @@ def create_app(
         return RedirectResponse("/champions")
 
     @app.get("/champions", response_class=HTMLResponse)
-    def champions(request: Request, role: str | None = None) -> HTMLResponse:
+    def champions(request: Request, role: str | None = None, status: str | None = None) -> HTMLResponse:
         role = role if role in ROLE_TAGS else None
-        shown = [c for c in catalogue.champions if role is None or role in c.tags]
-        rows = [{"champion": c, "owned": account.champions.get(c.id)} for c in shown]
+        status = status if status in _STATUS_NAMES else None
+        shown = [
+            c for c in catalogue.champions
+            if (role is None or role in c.tags) and (status is None or models.status(c.id).value == status)
+        ]
+        rows = [{"champion": c, "owned": account.champions.get(c.id), "status": models.status(c.id)} for c in shown]
         template = "_champion_rows.html" if request.headers.get("HX-Request") else "champions.html"
         return _TEMPLATES.TemplateResponse(
-            request, template, {"rows": rows, "role": role, "role_tags": ROLE_TAGS}
+            request, template,
+            {"rows": rows, "role": role, "role_tags": ROLE_TAGS, "status": status, "statuses": _STATUS_NAMES},
         )
+
+    @app.get("/model-status", response_class=HTMLResponse)
+    def model_status_page(request: Request) -> HTMLResponse:
+        table = [{"champion": c, "status": models.status(c.id)} for c in catalogue.champions]
+        with_sets = [a for a in catalogue.adventures if a.area_set_id is not None]
+        known = [a for a in with_sets if a.area_set_id in catalogue.area_sets]
+        coverage = (
+            f"Monster placement known for {len(known)} of {len(with_sets)} adventures "
+            f"({len({a.area_set_id for a in known})} of {len({a.area_set_id for a in with_sets})} area sets)"
+        )
+        if store is None:
+            history = "History: not recorded in offline mode"
+        else:
+            kept = store.load_history()
+            first = next((r.get("server_time") for r in kept if r.get("server_time")), None)
+            history = f"History: {len(kept)} record{'' if len(kept) == 1 else 's'}" + (
+                f" since {_date(first)}" if first else ""
+            )
+        context = {
+            "table": table,
+            "flags": ledger.open_flags(),
+            "checks": checks,
+            "coverage": coverage,
+            "history": history,
+            "data_folder": str(store.folder) if store is not None else None,
+            "opened": request.query_params.get("opened") == "1",
+        }
+        return _TEMPLATES.TemplateResponse(request, "model_status.html", context)
+
+    if store is not None:
+
+        @app.post("/data-folder")
+        def data_folder() -> RedirectResponse:
+            """Open the app data folder in the system's file browser."""
+            store.folder.mkdir(parents=True, exist_ok=True)
+            open_folder(store.folder)
+            return RedirectResponse("/model-status?opened=1", status_code=303)
 
     @app.get("/adventures")
     def adventures() -> RedirectResponse:
@@ -262,6 +316,8 @@ def create_app(
                 "gear": gear,
                 "feats": feats,
                 "spec_choices": catalogue.specializations.get(champion_id, ()),
+                "model_status": models.status(champion_id),
+                "model_evidence": _evidence(models, ledger, champion_id),
                 **_champion_usage_context(champion_id),  # how the advisor uses it (#37)
             },
         )
@@ -377,6 +433,36 @@ def _add_refresh(app: FastAPI, live: Refresher, results: Recompute) -> None:
         if computed is not None and computed != progress.completed and not progress.running:
             response.headers["HX-Refresh"] = "true"  # a recompute finished: swap stale results for fresh
         return response
+
+
+_STATUS_NAMES = tuple(s.value for s in ModelStatus)
+
+
+def open_folder(folder: Path) -> None:
+    """Show a folder in the system's file browser (Finder on macOS)."""
+    opener = "open" if sys.platform == "darwin" else "explorer" if sys.platform == "win32" else "xdg-open"
+    subprocess.Popen([opener, str(folder)])
+
+
+def _date(server_time: int) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(server_time))
+
+
+def _evidence(models: ChampionModels, ledger: model_status.Ledger, champion_id: int) -> list[dict]:
+    """What a champion's Model Status rests on, oldest first: description tests, then checks."""
+    reconstruction = models.reconstruction(champion_id)
+    if reconstruction is None:
+        return [{"text": "Scored on its generic effects only: no reconstruction of its unique effects yet.", "passed": None}]
+    tests = reconstruction.description_tests
+    rows = [{
+        "text": f"Description tests: {len(tests)} ({', '.join(tests)}), kept passing by the test suite."
+        if tests else "No description tests yet: it can't reach Verified.",
+        "passed": bool(tests),
+    }]
+    record = ledger.records.get(champion_id)
+    for e in record.evidence if record else ():
+        rows.append({"text": (f"{_date(e.at)}: " if e.at else "") + e.text, "passed": e.passed})
+    return rows
 
 
 def _ago(seconds: float) -> str:
