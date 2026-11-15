@@ -59,7 +59,7 @@ class Refresher:
         snapshot, definitions = self._store.load_snapshot(), self._store.load_definitions()
         if snapshot is None or definitions is None:
             return {}
-        return {**snapshot.responses, "getdefinitions": dict(definitions.tables)}
+        return {**snapshot.responses, "getdefinitions": {**definitions.tables, "checksum": definitions.checksum}}
 
     def on_refresh(self, listener: Callable[[RawResponses], None]) -> None:
         """Call `listener` with the new responses after each successful Refresh."""

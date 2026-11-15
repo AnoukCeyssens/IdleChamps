@@ -145,5 +145,52 @@ def test_no_legal_formation_shows_the_missing_piece(tmp_path_factory):
     assert rows(page, "main-dps") == []
 
 
-def test_other_run_goals_do_not_show_a_recommendation_yet(client):
-    assert rows(client.get("/adventures/7?goal=Gem%20Farm").text, "main-dps") == []
+def test_every_run_goal_tab_shows_a_recommendation(client):
+    for goal in ("Push", "Gem%20Farm", "Gold%20Farm"):
+        assert len(rows(client.get(f"/adventures/7?goal={goal}").text, "main-dps")) == 1, goal
+
+
+# --- "What would make this better" hints (#34) -----------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def hinted(tmp_path_factory) -> TestClient:
+    from test_hints import HINT_TABLES
+
+    def add_tables(responses):
+        responses["getdefinitions"] = {**responses["getdefinitions"], **HINT_TABLES}
+
+    return _app(tmp_path_factory, "hinted", add_tables)
+
+
+def test_opening_a_recommendation_loads_its_hints_with_numeric_gains(hinted):
+    page = hinted.get(GOLD.format(7)).text
+    (loader,) = re.findall(r'data-row="hints-loading" hx-get="([^"]+)" hx-trigger="load"', page)
+
+    hints = [r["text"] for r in rows(hinted.get(loader.replace("&amp;", "&")).text, "hint")]
+
+    assert hints[:2] == [
+        "Get Evelyn (The Great Modron March, Year 1) → +58% Torm's Favor per hour",
+        "Use a Potion of the Giant's Strength → +26% Torm's Favor per hour",
+    ]
+    assert "Blacksmith contract on Celeste's slot 2 (item level 5 → 29) → +0.5% Torm's Favor per hour" in hints
+    assert all(re.search(r" → \+[\d.]+% Torm's Favor per hour$", h) for h in hints)
+    assert not any("Potion of Speed" in h for h in hints)  # no modelled gain: not shown
+
+
+def test_potions_stay_out_of_the_baseline_score(hinted, modelled):
+    # Only Evil may play here, so Celeste (whose gear the hinted tables add) sits out: the two apps
+    # differ by potions alone, and the score must not.
+    page = hinted.get(GOLD.format(2024)).text
+    assert _one(page, "score") == _one(modelled.get(GOLD.format(2024)).text, "score")
+    assert "No potions." in [r["text"] for r in rows(page, "assumption")]
+
+
+def test_push_recommendations_load_hints_too(hinted):
+    page = hinted.get("/adventures/7?goal=Push").text
+    (loader,) = re.findall(r'data-row="hints-loading" hx-get="([^"]+)" hx-trigger="load"', page)
+
+    hints = [r["text"] for r in rows(hinted.get(loader.replace("&amp;", "&")).text, "hint")]
+
+    assert hints[0] == "Get Evelyn (The Great Modron March, Year 1) → +300% Main DPS damage"
+    assert all(re.search(r" → \+[\d.]+% Main DPS damage$", h) for h in hints)

@@ -37,14 +37,27 @@ def _assumptions(page: str) -> list[str]:
     return [r["text"] for r in rows(page, "assumption")]
 
 
+def _settle(live, adventure_ids=(9, 2040)) -> None:
+    """Run the pending Recompute jobs (computed in a worker, which sees the Area Set Cache too) for
+    the adventures these tests open; the rest stay pending."""
+    if not live.pools:
+        return
+    pool = live.pools[-1]
+    mine = [job for job in pool.pending if job[2][0] in adventure_ids]
+    pool.pending = mine + [job for job in pool.pending if job not in mine]
+    pool.run(len(mine))
+
+
 def _refresh(live, client: TestClient) -> None:
     live.clock.advance(3600)
     client.post("/refresh")
+    _settle(live)
 
 
 def test_area_sets_accumulate_across_refreshes_and_lift_the_cap(live):
     live.server.queue("getuserdetails", _without(6), _without(12))
     client = live.start()  # first Refresh: only set 12
+    _settle(live)
 
     before = client.get(PURE_ENERGY).text
     assert _verdict(before) == "Borderline" and rows(before, "push-cap")
@@ -67,6 +80,7 @@ def test_the_area_set_cache_survives_a_restart(live):
     client.__exit__(None, None, None)
 
     restarted = live.start()
+    _settle(live)
 
     assert _verdict(restarted.get(PURE_ENERGY).text) == "Likely"
 
@@ -81,6 +95,7 @@ def test_a_verdict_on_an_area_set_seen_under_an_older_game_version_says_so(live)
     _seed_old_set_6(live)
     live.server.queue("getuserdetails", _without(6))
     client = live.start()
+    _settle(live)
 
     page = client.get(PURE_ENERGY).text
 
@@ -94,6 +109,7 @@ def test_a_verdict_on_an_area_set_seen_under_an_older_game_version_says_so(live)
 def test_a_set_that_arrives_again_overwrites_the_old_copy(live):
     _seed_old_set_6(live)
     client = live.start()  # brings set 6 under the current version
+    _settle(live)
 
     page = client.get(PURE_ENERGY).text
 

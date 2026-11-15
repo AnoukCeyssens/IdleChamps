@@ -52,6 +52,9 @@
   .rail .score { font-size: 18px; font-weight: 600; margin: 0; }
   .rail .score .unit { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
   .rail .gap { margin: 2px 0 8px; color: var(--muted); }
+  .rail table.modron-grid { border-collapse: collapse; font-size: 10px; margin: 4px 0; }
+  .rail table.modron-grid td { width: 22px; height: 18px; text-align: center; border: 1px solid var(--line); }
+  .rail table.modron-grid td.node { background: #eef1fb; }
   .badge.warn { border-color: #e67700; color: #b35c00; display: inline-block; margin: 0; }
   .rail .exact { margin: 2px 0 8px; color: #2f9e44; }
   .rail .prove { margin: 4px 0 10px; }
@@ -120,7 +123,7 @@
         {% endif %}{% endfor %}{% endfor %}
         {% for s in slots %}{% set blocked = s.index in adv.blocked_slots %}
         {% set placed = recommendation.seats[loop.index0] if recommendation and recommendation.seats[loop.index0].champion else none %}
-        <g data-row="seat" class="seat{{ ' blocked' if blocked }}{{ ' front' if s.column == 0 }}{{ ' filled' if placed }}{{ ' main-dps' if placed and placed.is_main_dps }}" transform="translate({{ pad + s.x * scale - w / 2 }},{{ 24 + s.y * scale * 1.6 }})">
+        <g data-row="seat" class="seat{{ ' blocked' if blocked }}{{ ' front' if s.column == 0 }}{{ ' filled' if placed }}{{ ' main-dps' if placed and placed.is_main_dps }}{{ ' familiar' if placed and placed.familiar_id is not none }}" transform="translate({{ pad + s.x * scale - w / 2 }},{{ 24 + s.y * scale * 1.6 }})">
           <title>Slot {{ s.index }}{% if blocked %}: blocked by an escort{% endif %}</title>
           {% if blocked %}
           <rect width="{{ w }}" height="{{ h }}" rx="6" fill="#eeeef0" stroke="#8a8a8e" stroke-dasharray="4 3"/>
@@ -129,6 +132,10 @@
           <rect width="{{ w }}" height="{{ h }}" rx="6" fill="{{ '#e8ecfb' if placed.is_main_dps else '#fff' }}" stroke="{{ '#3b5bdb' if placed.is_main_dps else '#c9ccd3' }}" stroke-width="{{ 2 if placed.is_main_dps else 1 }}"/>
           <text x="{{ w / 2 }}" y="{{ h / 2 - 3 }}" text-anchor="middle" font-size="12" font-weight="600" fill="#1d1d1f">{{ placed.champion.name }}</text>
           <text x="{{ w / 2 }}" y="{{ h / 2 + 12 }}" text-anchor="middle" font-size="10" fill="{{ '#3b5bdb' if placed.is_main_dps else '#8a8a8e' }}">{{ placed.contribution_label }}</text>
+          {% if placed.familiar_id is not none %}
+          <circle cx="{{ w - 8 }}" cy="8" r="6" fill="#f3d36b" stroke="#b38f00"/>
+          <text x="{{ w / 2 }}" y="{{ h + 11 }}" text-anchor="middle" font-size="10" fill="#b38f00">Familiar {{ placed.familiar_id }}</text>
+          {% endif %}
           {% else %}
           <rect width="{{ w }}" height="{{ h }}" rx="6" fill="#fff" stroke="#c9ccd3" stroke-dasharray="2 3"/>
           <text x="{{ w / 2 }}" y="{{ h / 2 + 4 }}" text-anchor="middle" font-size="11" fill="#8a8a8e">Slot {{ s.index }} · empty</text>
@@ -141,6 +148,9 @@
       {% endif %}
     </div>
 
+    {% if recommendation and stale %}
+    <p class="infeasible" data-row="stale-result">Out of date: this recommendation is from before your last Refresh. A Recompute is running (progress in the header).</p>
+    {% endif %}
     {% if recommendation %}{% set rec = recommendation %}
     <div class="recommendation">
       <div class="rec-main">
@@ -208,10 +218,30 @@
         {% if rec.unverified_champions %}
         <p data-row="unverified-badge" class="badge warn">{{ rec.unverified_champions | length }} champion{{ 's' if rec.unverified_champions | length != 1 }} unverified, score may be off</p>
         {% endif %}
+        {% if rec.familiars %}
+        <h3>Familiars</h3>
+        <ul class="familiars">
+          {% for f in rec.familiars %}<li data-row="familiar">{{ f.name }}: {% if f.slot is not none %}slot {{ f.slot }} ({{ f.champion.name }}){% else %}on clicks{% endif %}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {% if rec.modron %}{% set m = rec.modron %}
+        <h3>Modron core</h3>
+        <p data-row="modron-core">{{ m.name }} · {{ m.experience }} experience · {{ m.nodes }} node{{ 's' if m.nodes != 1 }}</p>
+        <p data-row="modron-reset-area">{% if m.reset_area %}Reset area {{ m.reset_area }} ({{ 'recommended' if m.reset_area_optimised else 'as saved' }}){% else %}No reset{% endif %}</p>
+        {% if m.node_layout %}
+        <table class="modron-grid" aria-label="Node layout (saved)">
+          {% for row in m.node_layout %}<tr data-row="modron-node-row">{% for tile in row %}<td class="{{ 'node' if tile else 'empty' }}" title="{{ 'Tile ' ~ tile if tile else 'empty' }}">{{ tile or '' }}</td>{% endfor %}</tr>{% endfor %}
+        </table>
+        {% endif %}
+        {% endif %}
         <h3>Scoring Assumptions</h3>
         <ul class="assumptions">
           {% for a in rec.scoring_assumptions %}<li data-row="assumption">{{ a }}</li>{% endfor %}
         </ul>
+        {% if not rec.infeasible_reason %}
+        <h3>What would make this better</h3>
+        <div data-row="hints-loading" hx-get="/adventures/{{ adv.id }}/hints?goal={{ goal | urlencode }}{% if patron %}&patron={{ patron }}{% endif %}" hx-trigger="load" hx-swap="outerHTML">Finding upgrades…</div>
+        {% endif %}
         {% if rec.left_out %}
         <h3>Left out</h3>
         <ul class="left-out">

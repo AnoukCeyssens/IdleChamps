@@ -8,7 +8,7 @@ hints, comparisons, Push Verdict) are present and empty.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 from advisor.account import Account
 from advisor.catalogue import Adventure, Catalogue, Champion, Feat, Patron, Restriction, SpecializationOption
@@ -17,7 +17,7 @@ from advisor.formation_search import EXACT_TIME_LIMIT_S, Candidate, SearchProble
 from advisor.push_verdict import PushVerdict, breaking_needs, push_verdict
 from advisor.restrictions import describe, failed
 
-RUN_GOAL_METRICS = {"Push": "Main DPS damage", "Gem Farm": "Main DPS damage", "Gold Farm": "Favor per hour"}
+RUN_GOAL_METRICS = {"Push": "Main DPS damage", "Gem Farm": "Gems per hour", "Gold Farm": "Favor per hour"}
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,35 @@ class SeatRecommendation:
     feats: tuple[Feat, ...] = ()
     model_status: ModelStatus | None = None
     provided_by_adventure: bool = False  # a forced champion the player doesn't own
+    familiar_id: int | None = None  # the familiar placed on this slot
+
+
+@dataclass(frozen=True)
+class FamiliarPlacement:
+    familiar_id: int
+    slot: int | None  # None: on clicks
+    champion: Champion | None = None  # who it sits on
+
+    @property
+    def name(self) -> str:
+        return f"Familiar {self.familiar_id}"
+
+
+@dataclass(frozen=True)
+class ModronSetup:
+    core_id: int
+    experience: int
+    node_layout: tuple[tuple[int, ...], ...]  # the saved grid, trimmed to its placed nodes (0 = empty)
+    reset_area: int | None  # None: no reset (or none saved)
+    reset_area_optimised: bool  # chosen by the Run Goal's score (Gem Farm), else the saved area goal
+
+    @property
+    def name(self) -> str:
+        return f"Core {self.core_id}"
+
+    @property
+    def nodes(self) -> int:
+        return sum(1 for row in self.node_layout for tile in row if tile)
 
 
 @dataclass(frozen=True)
@@ -63,12 +92,15 @@ class FormationRecommendation:
     unverified_champions: tuple[Champion, ...]
     left_out: tuple[LeftOut, ...]
     infeasible_reason: str | None = None
+    familiars: tuple[FamiliarPlacement, ...] = ()  # every owned familiar: on a slot or on clicks
+    modron: ModronSetup | None = None
     # Filled by later tickets.
-    familiars: tuple = ()
-    modron: object | None = None
     hints: tuple = ()
     comparisons: tuple = ()
     push_verdict: PushVerdict | None = None  # Push only
+    # The search this recommendation came from (candidates after restrictions), for one-change hints (#34).
+    # Derived search state: not persisted (see results_codec), rebuilt by `with_search_problem`.
+    problem: SearchProblem | None = field(default=None, compare=False, repr=False, metadata={"persist": False})
     # "Prove it's the best" (#31): None until run; "improved" (a better formation replaced the fast
     # one), "proven" (the shown formation is the best possible) or "timed_out" (gap_pct remains).
     exact_solve: str | None = None
@@ -91,6 +123,7 @@ def recommend(
     campaign = catalogue.campaign(adventure.campaign_id)
     label = (
         f"{campaign.favor_name or 'Favor'} per hour (relative)" if run_goal == "Gold Farm"
+        else "Gems per hour" if run_goal == "Gem Farm"
         else f"{RUN_GOAL_METRICS.get(run_goal, 'Score')} (relative)"
     )
 
@@ -111,39 +144,19 @@ def recommend(
     rules = [(r, None) for r in adventure.restrictions]
     rules += [(r, patron_obj.name) for r in patron_obj.restrictions] if patron_obj else []
     forced = {f.champion_id: f for f in adventure.forced if catalogue.find(f.champion_id)}
-    candidates, left_out, rejected_by = [], [], {}
-    for champion in catalogue.champions:
-        if champion.id in forced:
-            f = forced[champion.id]
-            slot = f.slot if f.slot is not None and f.slot not in adventure.blocked_slots else None
-            candidates.append(Candidate(champion.id, champion.seat, models.loadouts(champion.id), True, slot))
-            continue
-        if not account.owns(champion.id):
-            continue
-        broken = [(r, who) for r, who in rules if failed([r], champion, account.server_time)]
-        if broken:
-            rule, who = broken[0]
-            left_out.append(LeftOut(champion, f"not allowed{f' by {who}' if who else ''}: {describe(rule, names)}"))
-            for r, _ in broken:
-                rejected_by[r] = rejected_by.get(r, 0) + 1
-            continue
-        candidates.append(Candidate(champion.id, champion.seat, models.loadouts(champion.id)))
-
+    candidates, left_out, rejected_by = _candidates(catalogue, account, adventure, patron_obj, models)
     if not candidates:
         return infeasible(_missing_piece(rejected_by, rules, names), left_out)
-    # The search keeps the first of equally scored options: list higher levels first.
-    candidates.sort(key=lambda c: -_level(account, c.champion_id))
     by_id = {c.champion_id: c for c in candidates}
-    dps = frozenset(c.champion_id for c in candidates if "dps" in catalogue.champion(c.champion_id).tags)
-    problem = SearchProblem(usable, tuple(candidates), dps or frozenset(by_id))
+    problem = _search_problem(catalogue, account, usable, candidates)
 
     needs = breaking_needs(catalogue, adventure, patron) if run_goal == "Push" else ()
 
     def plain_scorer(main):
-        return models.scorer(adventure.layout, run_goal, main)
+        return models.scorer(adventure.layout, run_goal, main, adventure=adventure)
 
     def breaking_scorer(main):
-        return models.scorer(adventure.layout, run_goal, main, breaking=needs)
+        return models.scorer(adventure.layout, run_goal, main, adventure=adventure, breaking=needs)
 
     def breaks_all(found) -> bool:
         scorer = breaking_scorer(found.main_dps)
@@ -175,6 +188,10 @@ def recommend(
 
     main = catalogue.champion(result.main_dps.champion_id)
     placed = {s.slot: s for s in result.seats}
+    setup = result.setup
+    familiar_on = {
+        slot: familiar for familiar, slot in zip(problem.familiars, setup.familiars if setup else ()) if slot is not None
+    }
     seats = []
     for slot in adventure.layout:
         if slot.index in adventure.blocked_slots:
@@ -200,8 +217,14 @@ def recommend(
                 feats=tuple(catalogue.feats.get(f) or Feat(f, champion.id, f"Feat {f}", "") for f in seat.loadout.feats),
                 model_status=models.status(champion.id),
                 provided_by_adventure=owned is None,
+                familiar_id=familiar_on.get(slot.index),
             )
         )
+    familiars = tuple(
+        FamiliarPlacement(f, slot, catalogue.champion(placed[slot].champion_id) if slot is not None else None)
+        for f, slot in zip(problem.familiars, setup.familiars if setup else (None,) * len(problem.familiars))
+    )
+    modron = _modron(account, setup.core if setup else None, run_goal, result.score.reset_area)
 
     seated = {s.champion_id for s in result.seats}
     holder = {catalogue.champion(s.champion_id).seat: s for s in result.seats}
@@ -249,9 +272,85 @@ def recommend(
         scoring_assumptions=models.assumptions(run_goal) + (verdict.assumptions if verdict else ()),
         unverified_champions=unverified,
         left_out=tuple(sorted(left_out, key=lambda l: (l.champion.seat, l.champion.id))),
+        familiars=familiars,
+        modron=modron,
+        problem=problem,
         exact_solve=exact_solve,
         push_verdict=verdict,
     )
+
+
+def with_search_problem(
+    catalogue: Catalogue, account: Account, rec: FormationRecommendation, *, models: ChampionModels | None = None
+) -> FormationRecommendation:
+    """`rec` with the search it came from, rebuilt when missing (results read back from the Store
+    don't persist it): the same candidates `recommend` searched, without searching again."""
+    if rec.problem is not None or rec.main_dps is None:
+        return rec
+    adventure = rec.adventure
+    usable = tuple(s for s in adventure.layout if s.index not in adventure.blocked_slots)
+    candidates, _, _ = _candidates(catalogue, account, adventure, rec.patron, models or ChampionModels(catalogue, account))
+    if not usable or not candidates:
+        return rec
+    return replace(rec, problem=_search_problem(catalogue, account, usable, candidates))
+
+
+def _candidates(
+    catalogue: Catalogue, account: Account, adventure: Adventure, patron_obj: Patron | None, models: ChampionModels
+) -> tuple[list[Candidate], list[LeftOut], dict[Restriction, int]]:
+    """The champions the search may seat (higher levels first), those the restrictions leave out,
+    and how many each restriction rejected."""
+    names = {c.id: c.name for c in catalogue.champions}
+    rules = [(r, None) for r in adventure.restrictions]
+    rules += [(r, patron_obj.name) for r in patron_obj.restrictions] if patron_obj else []
+    forced = {f.champion_id: f for f in adventure.forced if catalogue.find(f.champion_id)}
+    candidates, left_out, rejected_by = [], [], {}
+    for champion in catalogue.champions:
+        if champion.id in forced:
+            f = forced[champion.id]
+            slot = f.slot if f.slot is not None and f.slot not in adventure.blocked_slots else None
+            candidates.append(Candidate(champion.id, champion.seat, models.loadouts(champion.id), True, slot))
+            continue
+        if not account.owns(champion.id):
+            continue
+        broken = [(r, who) for r, who in rules if failed([r], champion, account.server_time)]
+        if broken:
+            rule, who = broken[0]
+            left_out.append(LeftOut(champion, f"not allowed{f' by {who}' if who else ''}: {describe(rule, names)}"))
+            for r, _ in broken:
+                rejected_by[r] = rejected_by.get(r, 0) + 1
+            continue
+        candidates.append(Candidate(champion.id, champion.seat, models.loadouts(champion.id)))
+    # The search keeps the first of equally scored options: list higher levels first.
+    candidates.sort(key=lambda c: -_level(account, c.champion_id))
+    return candidates, left_out, rejected_by
+
+
+def _search_problem(catalogue: Catalogue, account: Account, usable: tuple, candidates: list[Candidate]) -> SearchProblem:
+    dps = frozenset(c.champion_id for c in candidates if "dps" in catalogue.champion(c.champion_id).tags)
+    # Familiars are alike (their definitions are cosmetic); cores: most experience first.
+    cores = tuple(sorted(account.modron_cores, key=lambda c: (-account.modron_cores[c], c)))
+    return SearchProblem(
+        usable, tuple(candidates), dps or frozenset(c.champion_id for c in candidates),
+        tuple(sorted(account.familiar_ids)), cores,
+    )
+
+
+def _modron(account: Account, core_id: int | None, run_goal: str, reset_area: int | None) -> ModronSetup | None:
+    if core_id is None:
+        return None
+    save = account.modron_saves.get(core_id)
+    grid = save.grid if save else ()
+    rows = [i for i, row in enumerate(grid) if any(row)]
+    cols = [j for row in grid for j, tile in enumerate(row) if tile]
+    trimmed = tuple(row[min(cols) : max(cols) + 1] for row in grid[min(rows) : max(rows) + 1]) if rows else ()
+    if run_goal == "Gem Farm":
+        area, optimised = reset_area, True
+    elif run_goal == "Push":
+        area, optimised = None, False  # a Push runs until it stalls
+    else:
+        area, optimised = save.area_goal if save else None, False
+    return ModronSetup(core_id, account.modron_cores.get(core_id, 0), trimmed, area, optimised)
 
 
 def _level(account: Account, champion_id: int) -> int:

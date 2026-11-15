@@ -10,6 +10,13 @@ slots (a min-cost flow: a seat number holds at most one champion, so each seat r
 champion and loadout for that slot), then hill-climbs on the full score. The assignment of bounds is
 an upper bound per (Main DPS, slot); the best of them minus the best found is the reported gap.
 `exhaustive_search` tries every legal formation and is only for tiny instances (the test oracle).
+
+Familiars and modron cores (the `Setup`) are placed after the champions: a setup only lifts the
+placement score (`Scorer.lift`, increasing), so the best placement stays best under every setup. The
+fast search tries each split of familiars between the field (on the Main DPS, then the highest-bound
+seats) and clicks, for each core; the exhaustive search tries every familiar on every seated slot or on
+clicks. The upper bound is the placement bound lifted by the best setup.
+
 `exact_search` is the on-demand exact CP-SAT solve (#31), time-limited and never worse than the
 fast result it is given.
 """
@@ -28,9 +35,11 @@ from advisor.champion_models import FormationScore, Loadout, Seat
 
 
 class Scorer(Protocol):
-    def score(self, seats: Sequence[Seat]) -> FormationScore: ...
+    def score(self, seats: Sequence[Seat], setup: Setup | None = None) -> FormationScore: ...
 
     def bound(self, seat: Seat) -> float: ...
+
+    def lift(self, value: float, setup: Setup) -> float: ...
 
 
 @dataclass(frozen=True)
@@ -47,6 +56,17 @@ class SearchProblem:
     slots: tuple[Slot, ...]  # usable slots (escort-blocked slots already removed)
     candidates: tuple[Candidate, ...]
     main_dps_ids: frozenset[int]  # candidates allowed to be the Main DPS
+    familiars: tuple[int, ...] = ()  # familiar ids to place: on a seated champion's slot, or on clicks
+    cores: tuple[int, ...] = ()  # modron core ids to choose between, preferred first
+
+
+@dataclass(frozen=True)
+class Setup:
+    """Where each familiar goes (a slot, or None for clicks; in `SearchProblem.familiars` order) and the
+    modron core."""
+
+    familiars: tuple[int | None, ...] = ()
+    core: int | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +77,10 @@ class SearchResult:
     upper_bound: float  # log; no legal formation scores above it
     gap_pct: float  # at most this % below the best possible
     exact: bool  # from an exact solve (exhaustive here; CP-SAT in #31), not the fast search
+    setup: Setup | None = None  # familiars and modron core, when the problem has any
+    # Before the setup lifted them (`exact_search` works in these units); None: no setup applied.
+    placement: FormationScore | None = None
+    placement_upper_bound: float | None = None
 
 
 ScorerFor = Callable[[Seat], Scorer]
@@ -88,7 +112,24 @@ def search(problem: SearchProblem, scorer_for: ScorerFor, budget_s: float = 0.1)
     # Local search proves nothing, so the highest assignment bound stands as the upper bound.
     upper_bound = max(plans[0][0], best[0].value)
     gap = _gap_pct(upper_bound, best[0].value)
-    return SearchResult(best[1], best[2], best[0], upper_bound, gap, exact=False)
+    return _add_setup(problem, scorer_for, SearchResult(best[1], best[2], best[0], upper_bound, gap, exact=False))
+
+
+def _add_setup(problem: SearchProblem, scorer_for: ScorerFor, result: SearchResult) -> SearchResult:
+    """Places familiars and picks the core for a placement-level result, lifting its score and bound."""
+    if not _has_setup(problem):
+        return result
+    scorer = scorer_for(result.main_dps)
+    setup, score = max(
+        ((s, scorer.score(result.seats, s)) for s in _quick_setups(problem, result.main_dps, result.seats, scorer)),
+        key=lambda pair: pair[1].value,  # max keeps the first of equals
+    )
+    upper = max(score.value, max(scorer.lift(result.upper_bound, s) for s in _lift_setups(problem)))
+    gap = 0.0 if result.gap_pct == 0 else _gap_pct(upper, score.value)
+    return replace(
+        result, score=score, upper_bound=upper, gap_pct=gap, setup=setup,
+        placement=result.score, placement_upper_bound=result.upper_bound,
+    )
 
 
 def exhaustive_search(problem: SearchProblem, scorer_for: ScorerFor) -> SearchResult | None:
@@ -97,12 +138,58 @@ def exhaustive_search(problem: SearchProblem, scorer_for: ScorerFor) -> SearchRe
     for main in _main_seats(problem):
         scorer = scorer_for(main)
         for seats in _all_formations(problem, main):
-            score = scorer.score(seats)
-            if best is None or score.value > best[0].value + 1e-12:
-                best = (score, main, seats)
+            if not _has_setup(problem):
+                score = scorer.score(seats)
+                if best is None or score.value > best[0].value + 1e-12:
+                    best = (score, main, seats, None)
+                continue
+            # Skip the setups when even the best of them can't beat what was found (lift is increasing
+            # and ignores which slots hold the familiars, so this only skips losers).
+            placement = scorer.score(seats).value
+            if best is not None and max(scorer.lift(placement, s) for s in _lift_setups(problem)) <= best[0].value + 1e-12:
+                continue
+            for setup in _all_setups(problem, seats):
+                score = scorer.score(seats, setup)
+                if best is None or score.value > best[0].value + 1e-12:
+                    best = (score, main, seats, setup)
     if best is None:
         return None
-    return SearchResult(best[1], best[2], best[0], best[0].value, 0.0, exact=True)
+    return SearchResult(best[1], best[2], best[0], best[0].value, 0.0, exact=True, setup=best[3])
+
+
+def _has_setup(problem: SearchProblem) -> bool:
+    return bool(problem.familiars or problem.cores)
+
+
+def _cores(problem: SearchProblem):
+    return problem.cores or (None,)
+
+
+def _quick_setups(problem: SearchProblem, main: Seat, seats: tuple[Seat, ...], scorer: Scorer):
+    """Familiars on the Main DPS, then on the seats with the highest bound; the rest on clicks."""
+    order = sorted(seats, key=lambda s: (s != main, -scorer.bound(s), s.slot))
+    count = len(problem.familiars)
+    for core in _cores(problem):
+        for k in range(min(count, len(order)), -1, -1):
+            yield Setup(tuple(s.slot for s in order[:k]) + (None,) * (count - k), core)
+
+
+def _lift_setups(problem: SearchProblem):
+    """One setup per (field count, core): `lift` must not depend on which slots hold the familiars."""
+    count = len(problem.familiars)
+    for core in _cores(problem):
+        for k in range(count + 1):
+            yield Setup(tuple(range(k)) + (None,) * (count - k), core)
+
+
+def _all_setups(problem: SearchProblem, seats: tuple[Seat, ...]):
+    """Every familiar on every seated slot (one per slot) or on clicks, for every core."""
+    targets = [s.slot for s in seats] + [None]
+    for core in _cores(problem):
+        for familiars in itertools.product(targets, repeat=len(problem.familiars)):
+            placed = [f for f in familiars if f is not None]
+            if len(placed) == len(set(placed)):
+                yield Setup(familiars, core)
 
 
 # Exact solve (#31): log weights are scaled to integers for CP-SAT. Each seat's weight is rounded,
@@ -136,6 +223,11 @@ def exact_search(
     from ortools.sat.python import cp_model
 
     deadline = time.perf_counter() + max(0.0, time_limit_s)
+    if incumbent is not None and incumbent.placement is not None:  # back to placement units
+        incumbent = replace(
+            incumbent, score=incumbent.placement, upper_bound=incumbent.placement_upper_bound,
+            setup=None, placement=None, placement_upper_bound=None,
+        )
     best = (incumbent.score, incumbent.main_dps, incumbent.seats) if incumbent else None
     found_here = False
     plans = []
@@ -190,8 +282,8 @@ def exact_search(
         ceiling = max(best[0].value, min(ceiling, incumbent.upper_bound))
     gap = 0.0 if ceiling - best[0].value <= _PROVEN_TOL else _gap_pct(ceiling, best[0].value)
     if incumbent is not None and not found_here:
-        return replace(incumbent, upper_bound=ceiling, gap_pct=gap)
-    return SearchResult(best[1], best[2], best[0], ceiling, gap, exact=True)
+        return _add_setup(problem, scorer_for, replace(incumbent, upper_bound=ceiling, gap_pct=gap))
+    return _add_setup(problem, scorer_for, SearchResult(best[1], best[2], best[0], ceiling, gap, exact=True))
 
 
 def _exact_model(cp_model, problem: SearchProblem, main: Seat, scorer: Scorer):
@@ -422,3 +514,14 @@ def _max_assignment(weights: list[list[float]]) -> list[int]:
         if p[j]:
             result[p[j] - 1] = j - 1
     return result
+
+
+def plan_bounds(problem: SearchProblem, scorer_for: ScorerFor) -> dict[Seat, float]:
+    """The assignment bound of every feasible Main DPS seat: no formation built around that seat
+    scores above it (log). The cheap first step of `search`, used alone to prune one-change hints."""
+    bounds = {}
+    for main in _main_seats(problem):
+        plan = _assign(problem, main, scorer_for(main))
+        if plan is not None:
+            bounds[main] = plan[0]
+    return bounds

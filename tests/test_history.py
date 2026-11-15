@@ -140,6 +140,16 @@ def test_a_changed_champion_level_changes_the_key_and_stores_the_owned_state_aga
     assert second["owned_state"]["champions"]["1"]["level"] == 310
 
 
+
+def test_a_changed_modron_reset_area_changes_the_key(live):
+    client = live.start()
+
+    _refresh_again(live, client, _later(60, lambda d: d["modron_saves"]["1"].update(area_goal="350")))
+
+    first, second = _history(live)
+    assert second["recommendation_key"] != first["recommendation_key"]  # it shapes the Gem Farm result
+    assert second["owned_state"]["modron_saves"]["1"]["area_goal"] == 350
+
 def test_the_owned_state_returns_once_the_key_changes_again(live):
     client = live.start()
     _refresh_again(live, client, _later(60, lambda d: d.update(red_rubies=1000)))

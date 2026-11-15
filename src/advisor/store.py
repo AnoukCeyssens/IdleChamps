@@ -9,6 +9,8 @@ field, each file written atomically (temp file + rename):
   responses minus definitions, shop/promo and server stats).
 - `area_sets.json.gz`: the Area Set Cache (monster placement per `area_set_id`, each with the game
   version it was last seen under); grows with every Refresh, never expires (`advisor.area_sets`).
+- `results.json.gz`: the precomputed Formation Recommendations (`recompute.py`), with the key
+  they were computed for (recommendation key, definitions checksum, code fingerprint).
 - `history.jsonl.gz`: append-only History Records, one JSON line each (one gzip member per
   record), each line with its own version field.
 - `config.toml`: configurable values (written by hand; there is no settings page).
@@ -33,6 +35,7 @@ from advisor.request_log import strip_credentials
 
 DEFINITIONS_VERSION = 1
 SNAPSHOT_VERSION = 1
+RESULTS_VERSION = 1
 HISTORY_FILE = "history.jsonl.gz"
 
 DEFAULT_DATA_DIR = Path.home() / "Library/Application Support/IdleChampsAdvisor"
@@ -102,6 +105,14 @@ class Store:
 
     def save_area_sets(self, cache: Mapping) -> None:
         self._write("area_sets.json.gz", area_sets.to_json(cache))
+
+    def load_results(self) -> tuple[list, list] | None:
+        """(key, entries) as `save_results` wrote them, or None."""
+        data = self._read("results.json.gz", RESULTS_VERSION)
+        return (data["key"], data["results"]) if data else None
+
+    def save_results(self, key: list, entries: list) -> None:
+        self._write("results.json.gz", {"version": RESULTS_VERSION, "key": key, "results": entries})
 
     def append_history(self, record: Mapping[str, Any]) -> None:
         """Add one History Record. The file is rewritten atomically, so a crash never leaves a

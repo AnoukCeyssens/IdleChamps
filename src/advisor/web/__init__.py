@@ -18,9 +18,11 @@ from advisor.area_sets import merge as merge_area_sets
 from advisor.catalogue import GEAR_SLOTS, ROLE_TAGS, Catalogue, parse_catalogue
 from advisor.champion_models import ChampionModels
 from advisor.explorer import RUN_GOALS, adventure_node, tree
+from advisor.hints import hints as one_change_hints
 from advisor.history import write_history
 from advisor.game_client import DEFAULT_LOG, HttpTransport, LiveGameClient, OfflineGameClient, Transport
-from advisor.recommendation import recommend
+from advisor.recommendation import recommend, with_search_problem
+from advisor.recompute import ExecutorFactory, Recompute, process_pool
 from advisor.refresh import Refresher
 from advisor.request_log import RawResponses
 from advisor.store import Store, load_config
@@ -28,21 +30,27 @@ from advisor.store import Store, load_config
 _TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
 _TEMPLATES.env.filters["sci"] = lambda x: f"{x:,.0f}" if 100 <= x < 1e6 else f"{x:.3g}" if x < 100 else f"{x:.2e}".replace("e+", "e")
 
-# Run Goals whose tab shows a Formation Recommendation so far (Push: #32, Gem Farm: #29).
-_RECOMMENDED_GOALS = ("Gold Farm",)
+# Run Goals whose tab shows a Formation Recommendation.
+_RECOMMENDED_GOALS = ("Gem Farm", "Gold Farm")
 _RECOMMENDED_GOALS += ("Push",)  # with its Push Verdict (#32)
 
 
-def create_app(log_path: Path | None = None, *, live: Refresher | None = None, store: Store | None = None) -> FastAPI:
+def create_app(
+    log_path: Path | None = None, *, live: Refresher | None = None, recompute: Recompute | None = None,
+    store: Store | None = None,
+) -> FastAPI:
     """The advisor, either in offline mode on a request log (the game's or a fixture), or
-    live: showing the Store's cached data and refreshing it from the game servers. With a `store`,
-    the Area Set Cache there takes in every set the responses bring and serves all it holds."""
+    live: showing the Store's cached data and refreshing it from the game servers.
+    `recompute` holds the Formation Recommendations (precomputed after each Refresh in live
+    mode); by default they are computed on demand when a tab is opened. With a `store`, the Area
+    Set Cache there takes in every set the responses bring and serves all it holds."""
     raw: RawResponses = OfflineGameClient(log_path).fetch() if live is None else live.responses()
     catalogue, account = Catalogue(champions=()), Account(champions={})
     models = ChampionModels(catalogue, account)
-    recommendations: dict[tuple, object] = {}  # computed on demand when a tab is opened
+    results = recompute or Recompute(_RECOMMENDED_GOALS)
+    hints: dict[tuple, tuple] = {}  # "What would make this better", computed when a recommendation is opened
 
-    def load(responses: RawResponses) -> None:
+    def load(responses: RawResponses, *, refreshed: bool = True) -> None:
         """(Re)build everything the pages show from raw responses (at start and after a Refresh)."""
         nonlocal raw, catalogue, account, models
         if "getdefinitions" not in responses or "getuserdetails" not in responses:
@@ -55,21 +63,22 @@ def create_app(log_path: Path | None = None, *, live: Refresher | None = None, s
             catalogue = replace(catalogue, area_sets=cache)
         account = parse_account(raw)
         models = ChampionModels(catalogue, account)
-        recommendations.clear()
+        results.update(raw, catalogue, account, models, precompute=refreshed)
+        hints.clear()
 
-    load(raw)
+    load(raw, refreshed=False)
     app = FastAPI(
         title="Idle Champions Advisor",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        lifespan=_refresh_on_start(live) if live else None,
+        lifespan=_refresh_on_start(live, results) if live else None,
     )
     if live is None:
         app.state.header = lambda: {"mode": "offline"}
     else:
         live.on_refresh(load)
-        _add_refresh(app, live)
+        _add_refresh(app, live, results)
 
     @app.get("/")
     def home() -> RedirectResponse:
@@ -102,6 +111,7 @@ def create_app(log_path: Path | None = None, *, live: Refresher | None = None, s
             raise HTTPException(404, "No such adventure")
         goal = goal if goal in RUN_GOALS else RUN_GOALS[0]
         patron = patron if patron in found.patron_objectives else None
+        recommendation, stale = results.get(found, goal, patron) if goal in _RECOMMENDED_GOALS else (None, False)
         context = {
             "tree": tree(catalogue, account),
             "node": adventure_node(catalogue, account, found),
@@ -110,7 +120,8 @@ def create_app(log_path: Path | None = None, *, live: Refresher | None = None, s
             "goal": goal,
             "goals": RUN_GOALS,
             "patron": patron,
-            "recommendation": _recommendation(found, goal, patron) if goal in _RECOMMENDED_GOALS else None,
+            "recommendation": recommendation,
+            "stale": stale,  # from before the running recompute
             "patrons": [
                 {"patron": catalogue.patron(pid), "area": area, "locked": pid not in account.unlocked_patron_ids}
                 for pid, area in found.patron_objectives.items()
@@ -118,11 +129,25 @@ def create_app(log_path: Path | None = None, *, live: Refresher | None = None, s
         }
         return _TEMPLATES.TemplateResponse(request, "formation.html", context)
 
-    def _recommendation(found, goal, patron):
+    @app.get("/adventures/{adventure_id}/hints", response_class=HTMLResponse)
+    def adventure_hints(
+        request: Request, adventure_id: int, goal: str = RUN_GOALS[0], patron: int | None = None
+    ) -> HTMLResponse:
+        """The right rail's hints, loaded by the Formation view once the recommendation is shown."""
+        found = catalogue.adventure(adventure_id)
+        if found is None:
+            raise HTTPException(404, "No such adventure")
+        patron = patron if patron in found.patron_objectives else None
+        rec, stale = results.get(found, goal, patron) if goal in _RECOMMENDED_GOALS else (None, False)
         key = (found.id, goal, patron)
-        if key not in recommendations:
-            recommendations[key] = recommend(catalogue, account, found, goal, patron, models=models)
-        return recommendations[key]
+        shown = hints.get(key, ())
+        if rec is not None and key not in hints:
+            rec = with_search_problem(catalogue, account, rec, models=models)  # persisted results carry none
+            shown = one_change_hints(catalogue, account, rec, models=models)
+            if not stale:  # a stale result is replaced once the recompute reaches it
+                hints[key] = shown
+        metric = rec.score_label.removesuffix(" (relative)") if rec else ""
+        return _TEMPLATES.TemplateResponse(request, "_hints.html", {"hints": shown, "metric": metric})
 
     @app.post("/adventures/{adventure_id}/prove")
     def prove(adventure_id: int, goal: str = RUN_GOALS[0], patron: int | None = None) -> RedirectResponse:
@@ -134,9 +159,9 @@ def create_app(log_path: Path | None = None, *, live: Refresher | None = None, s
         goal = goal if goal in RUN_GOALS else RUN_GOALS[0]
         patron = patron if patron in found.patron_objectives else None
         if goal in _RECOMMENDED_GOALS:
-            recommendations[(found.id, goal, patron)] = recommend(
-                catalogue, account, found, goal, patron, models=models, solver="exact"
-            )
+            proven = recommend(catalogue, account, found, goal, patron, models=models, solver="exact")
+            results.put(found, goal, patron, proven)
+            hints.pop((found.id, goal, patron), None)  # gains are measured against the shown formation
         query = f"goal={quote(goal)}" + (f"&patron={patron}" if patron is not None else "")
         return RedirectResponse(f"/adventures/{found.id}?{query}", status_code=303)
 
@@ -182,6 +207,7 @@ def create_live_app(
     clock: Callable[[], float] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     background: Callable | None = None,
+    executor: ExecutorFactory = process_pool,
 ) -> FastAPI:
     """The advisor in live mode on an app data folder (config, caches)."""
     config = load_config(data_dir, DEFAULT_LOG)
@@ -192,19 +218,20 @@ def create_live_app(
     store = Store(data_dir)
     refresher = Refresher(client, store, cooldown=config.cooldown_seconds, clock=clock or time.time, **options)
     refresher.on_refresh(lambda responses: write_history(store, responses))
-    return create_app(live=refresher, store=store)
+    return create_app(live=refresher, recompute=Recompute(_RECOMMENDED_GOALS, store=store, executor=executor), store=store)
 
 
-def _refresh_on_start(live: Refresher):
+def _refresh_on_start(live: Refresher, results: Recompute):
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         live.start()
         yield
+        results.close()
 
     return lifespan
 
 
-def _add_refresh(app: FastAPI, live: Refresher) -> None:
+def _add_refresh(app: FastAPI, live: Refresher, results: Recompute) -> None:
     """The header's Refresh button, and the header itself (polled to stay current)."""
 
     def header() -> dict:
@@ -212,7 +239,7 @@ def _add_refresh(app: FastAPI, live: Refresher) -> None:
         ago = None
         if status.refreshed_at is not None:
             ago = _ago(live.now() - status.refreshed_at)
-        return {"mode": "live", "status": status, "ago": ago}
+        return {"mode": "live", "status": status, "ago": ago, "recompute": results.progress()}
 
     app.state.header = header
 
@@ -223,11 +250,13 @@ def _add_refresh(app: FastAPI, live: Refresher) -> None:
         return RedirectResponse((back.path or "/") + (f"?{back.query}" if back.query else ""), status_code=303)
 
     @app.get("/header", response_class=HTMLResponse)
-    def header_partial(request: Request, seen: int = -1) -> HTMLResponse:
+    def header_partial(request: Request, seen: int = -1, computed: int | None = None) -> HTMLResponse:
         response = _TEMPLATES.TemplateResponse(request, "_header.html", {})
-        status = live.status()
+        status, progress = live.status(), results.progress()
         if seen != status.generation and not status.running:
             response.headers["HX-Refresh"] = "true"  # new data arrived: reload the page around it
+        if computed is not None and computed != progress.completed and not progress.running:
+            response.headers["HX-Refresh"] = "true"  # a recompute finished: swap stale results for fresh
         return response
 
 
