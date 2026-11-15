@@ -7,6 +7,7 @@ failed. It never falls back to the request log's own responses.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -16,6 +17,8 @@ from typing import Any
 from advisor.game_client import LiveGameClient, RefreshError
 from advisor.request_log import RawResponses
 from advisor.store import Snapshot, Store, merge_definitions
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -90,7 +93,7 @@ class Refresher:
         return RefreshStatus(self._lock.locked(), self._refreshed_at, self._error, left, self._generation)
 
     def _run(self) -> None:
-        cached = self._store.load_definitions()
+        cached, last_snapshot = self._store.load_definitions(), self._store.load_snapshot()
         try:
             raw = self._client.refresh(cached.checksum if cached else None)
             now = self._clock()
@@ -110,9 +113,19 @@ class Refresher:
                 f"The game's answer couldn't be read ({type(error).__name__}).", "Refresh again later."
             )
             return
+        responses = self.responses()
+        try:
+            for listener in self._listeners:
+                listener(responses)
+        except Exception as error:  # the answer arrived but couldn't be parsed; the last good data stays loaded
+            log.exception("Refresh: the game's answer couldn't be read")
+            if cached is not None and last_snapshot is not None:  # don't leave the unreadable answer on disk
+                self._store.save_definitions(cached)
+                self._store.save_snapshot(last_snapshot)
+            self._error = RefreshError(
+                f"The game's answer couldn't be read ({type(error).__name__}).", "Refresh again later."
+            )
+            return
         self._error = None
         self._succeeded_at = self._refreshed_at = now
         self._generation += 1
-        responses = self.responses()
-        for listener in self._listeners:
-            listener(responses)

@@ -24,7 +24,7 @@ _Avoid_: sync, update, reload
 A hash of the recommendation-relevant part of the Player Snapshot (owned champions and their levels, gear, feats, specializations, familiars, modron cores, completion, best areas; never currencies). Recommendations are kept per Recommendation Key and Game Definitions checksum.
 
 **Recompute**:
-Computing every adventure × Run Goal again in the background after a Refresh changed the Recommendation Key or the Game Definitions. Until it finishes, the earlier recommendations stay visible, marked out of date.
+Computing every adventure the player can start now × Run Goal again in the background after a Refresh changed the Recommendation Key or the Game Definitions. Until it finishes, the earlier recommendations stay visible, marked out of date.
 _Avoid_: rebuild, reindex
 
 **Run Goal**:

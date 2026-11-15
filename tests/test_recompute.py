@@ -14,7 +14,7 @@ from conftest import rows
 from fake_game import RECOMPUTE, definitions, user_details
 
 GOLD = "/adventures/{}?goal=Gold%20Farm"
-KEPT = (7, 9, 44, 45)  # adventures kept in the trimmed snapshot
+KEPT = (7, 9, 44, 45)  # adventures kept in the trimmed snapshot (44, 45: events not running)
 
 
 def _small(change=lambda details: None) -> dict:
@@ -53,20 +53,27 @@ def _level_up(details):
     hero["level"] = str(int(hero["level"]) + 1)
 
 
-def test_a_refresh_queues_every_adventure_including_events_not_running(live):
+def test_a_refresh_queues_the_adventures_i_can_start_my_running_ones_first(live):
+    """Only adventures I can start now are precomputed (one job each, all Run Goals); the rest are
+    computed when opened. Real accounts see ~2000 adventures, too many to precompute."""
     client = live.start()
     [pool] = live.pools
 
-    assert len(pool.jobs(RECOMPUTE)) == 124  # every adventure in the recording, one job each (all Run Goals)
-    assert _progress(client.get("/champions").text) == "Recomputing 0/124 adventures"
+    queued = [adventure_id for adventure_id, _ in pool.jobs(RECOMPUTE)]
+    assert len(queued) == 18  # of the recording's 124
+    assert set(queued[:2]) == {2036, 9}  # my running game instances' adventures first
+    assert 44 not in queued  # an event that isn't running
+    assert 50 not in queued  # running, but not unlocked yet
+    assert _progress(client.get("/champions").text) == "Recomputing 0/18 adventures"
+    assert rows(client.get(GOLD.format(44)).text, "main-dps")  # computed on demand when opened
 
 
 def test_progress_is_shown_in_the_header_until_the_recompute_is_done(live, client):
     [pool] = live.pools
-    assert _progress(client.get("/champions").text) == "Recomputing 0/4 adventures"
+    assert _progress(client.get("/champions").text) == "Recomputing 0/2 adventures"
 
     pool.run(1, RECOMPUTE)
-    assert _progress(client.get("/champions").text) == "Recomputing 1/4 adventures"
+    assert _progress(client.get("/champions").text) == "Recomputing 1/2 adventures"
 
     pool.run(kind=RECOMPUTE)
     page = client.get(GOLD.format(7)).text
@@ -93,7 +100,7 @@ def test_old_results_stay_visible_marked_stale_while_a_recompute_runs(live, clie
 
     page = _refresh_with(live, client, _level_up).text
 
-    assert _progress(page) == "Recomputing 0/4 adventures"
+    assert _progress(page) == "Recomputing 0/2 adventures"
     page = client.get(GOLD.format(7)).text
     assert rows(page, "main-dps") == before
     [stale] = rows(page, "stale-result")
@@ -122,7 +129,7 @@ def test_a_key_change_mid_recompute_cancels_it_and_restarts_from_the_new_snapsho
 
     assert first.shut_down and first.pending == []  # pending jobs cancelled (Next Steps' too)
     [_, second] = live.pools  # the harness fails if a pool starts before the old one is shut down
-    assert _progress(page) == "Recomputing 0/4 adventures"
+    assert _progress(page) == "Recomputing 0/2 adventures"
     second.run(kind=RECOMPUTE)
     assert _progress(client.get("/champions").text) is None
 
@@ -152,20 +159,18 @@ def test_a_definitions_change_recomputes_after_a_restart(live, client):
     client.__exit__(None, None, None)
     live.start()
 
-    assert len(live.pools[-1].jobs(RECOMPUTE)) == 4
+    assert len(live.pools[-1].jobs(RECOMPUTE)) == 2  # 7 and 9; 44 and 45 are events not running
 
 
-def test_patron_variants_are_precomputed_too(live, client):
-    """Spec #22: every adventure × Run Goal is computed on Refresh, patron variants included. Read
-    back from the app data folder's results file."""
+def test_patron_variants_are_computed_when_opened(live, client):
+    """Precompute covers patron=None only; a patron variant is computed when opened, then kept."""
     from advisor.store import Store
 
     live.pools[0].run(kind=RECOMPUTE)
 
     _, entries = Store(live.data_dir).load_results()
-    patron_variants = {(a, g, p) for a, g, p, _ in entries if p is not None}
-    assert {(9, goal, 1) for goal in ("Push", "Gem Farm", "Gold Farm")} <= patron_variants  # Pure Energy (Mirt)
-    page = client.get("/adventures/9?goal=Push&patron=1").text
+    assert entries and all(p is None for _, _, p, _ in entries)
+    page = client.get("/adventures/9?goal=Push&patron=1").text  # Pure Energy (Mirt)
     assert rows(page, "main-dps") and not rows(page, "stale-result")
 
 

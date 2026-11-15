@@ -284,3 +284,45 @@ def test_fast_search_matches_an_exhaustive_solve_within_its_gap(modelled, advent
         on_field = [f.slot for f in rec.familiars if f.slot is not None]
         assert len(set(on_field)) == len(on_field) and set(on_field) <= seated
         assert rec.modron.core_id in (1, 2)
+
+
+# `patron_defines` exactly as the live definitions send them (2026-11-15): `game_changes` keyed by
+# tier, tag expressions in `by_tags`, a `TimeAvailable` expression, and `force_allow_hero` exceptions.
+LIVE_PATRON_DEFINES = [
+    {"id": 1, "name": "Mirt the Moneylender", "game_changes": {"1": [
+        {"type": "disallow_crusaders", "by_tags": {"tags": "!(good|evil)", "blocked_portrait": 6237}}]}},
+    {"id": 2, "name": "Vajra Safahr", "game_changes": {"1": [
+        {"type": "disallow_crusaders", "by_stat": {"stats": [{"stat": "con", "comp": "<", "value": 14}]}}]}},
+    {"id": 3, "name": "Strahd von Zarovich", "game_changes": {"1": [
+        {"type": "disallow_crusaders", "by_stat": {"stats": [{"stat": "int", "comp": "<", "value": 13}]}},
+        {"type": "force_allow_hero", "hero_ids": [102, 177]}]}},
+    {"id": 4, "name": "Zariel", "game_changes": {"1": [
+        {"type": "disallow_crusaders", "by_stat": {"stats": [
+            {"stat": "cha", "comp": "<", "value": 13}, {"stat": "str", "comp": "<", "value": 10}], "pass_any": True}},
+        {"type": "force_allow_hero", "hero_ids": [143]}]}},
+    {"id": 5, "name": "Elminster", "game_changes": {"1": [
+        {"type": "disallow_crusaders", "by_expr": {"expr": "TimeAvailable(`days`) > (365 * 3)", "pass_any": True}},
+        {"type": "force_allow_hero", "hero_ids": [147]}]}},
+]
+
+
+@pytest.mark.parametrize(
+    "patron, allowed, exceptions",
+    [
+        (1, lambda c: "good" in c.tags or "evil" in c.tags, ()),
+        (2, lambda c: c.ability_scores["con"] >= 14, ()),
+        (3, lambda c: c.ability_scores["int"] >= 13, (102, 177)),
+        (4, lambda c: c.ability_scores["str"] >= 10 and c.ability_scores["cha"] >= 13, (143,)),
+        (5, lambda c: max(c.date_available, c.last_rework_date) >= "2023-11-16", (147,)),  # snapshot: 2026-11-15
+    ],
+)
+def test_live_patron_rules_let_in_exactly_who_the_game_does(raw, patron, allowed, exceptions):
+    from advisor.restrictions import allows
+
+    catalogue, account = _with_definitions(raw, patron_defines=LIVE_PATRON_DEFINES)
+    rules = catalogue.patron(patron).restrictions
+    verdicts = {c.name: allows(rules, c, account.server_time) for c in catalogue.champions}
+
+    expected = {c.name: c.id in exceptions or allowed(c) for c in catalogue.champions}
+    assert verdicts == expected
+    assert any(expected.values()) and not all(expected.values())

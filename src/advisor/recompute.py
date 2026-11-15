@@ -1,7 +1,9 @@
 """Recompute: Formation Recommendations precomputed in a background process pool (spec #22, #13).
 
-After each Refresh every adventure × Run Goal (patron variants and events that aren't running
-included) is computed, so opening an adventure is instant. Results are keyed on the account's recommendation key, the
+After each Refresh every adventure I can start now × Run Goal is computed (without a patron), my
+running game instances' adventures first, then ones I've played; so opening those is instant. The
+rest (locked adventures, events that aren't running, patron variants) are computed when opened:
+a real account has ~2000 adventures and a job takes seconds to minutes. Results are keyed on the account's recommendation key, the
 definitions checksum and the advisor's own code, and persisted in the Store, so a restart (or a
 currency-only Refresh) reuses them.
 
@@ -24,6 +26,7 @@ from advisor.account import Account
 from advisor.background import DataKey, WorkerData, Workers, worker_data
 from advisor.catalogue import Adventure, Catalogue
 from advisor.champion_models import ChampionModels
+from advisor.explorer import is_unlocked
 from advisor.recommendation import FormationRecommendation, recommend
 from advisor.request_log import RawResponses
 from advisor.results_codec import Decoder, Encoder
@@ -131,7 +134,8 @@ class Recompute:
         self._workers.close()
 
     def _start(self, run: int, catalogue: Catalogue) -> None:
-        adventures = [a.id for a in catalogue.adventures]
+        account = self._inputs[1]
+        adventures = [a.id for a in _precompute_order(catalogue, account)]
         if not adventures:
             with self._lock:
                 self._old, self._complete = {}, True
@@ -194,12 +198,16 @@ class Recompute:
         return True
 
 
+def _precompute_order(catalogue: Catalogue, account: Account) -> list[Adventure]:
+    """The adventures I can start now: my running instances' first, then ones I've played, then
+    the rest in catalogue order."""
+    running = {i.adventure_id for i in account.instances}
+    startable = [a for a in catalogue.adventures if is_unlocked(catalogue, account, a)]
+    return sorted(startable, key=lambda a: (a.id not in running, not account.best_areas.get(a.id)))
+
+
 def compute_job(adventure_id: int, goals: tuple[str, ...]) -> list[tuple[ResultKey, FormationRecommendation]]:
-    """Worker side: every goal's recommendation for one adventure and each of its patron variants."""
+    """Worker side: every goal's recommendation for one adventure (no patron)."""
     catalogue, account, models = worker_data()
     adventure = catalogue.adventure(adventure_id)
-    return [
-        ((adventure_id, goal, patron), recommend(catalogue, account, adventure, goal, patron, models=models))
-        for patron in (None, *adventure.patron_objectives)
-        for goal in goals
-    ]
+    return [((adventure_id, goal, None), recommend(catalogue, account, adventure, goal, None, models=models)) for goal in goals]

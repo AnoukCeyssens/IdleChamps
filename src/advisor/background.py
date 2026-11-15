@@ -2,8 +2,9 @@
 
 Both precompute on the same data (the snapshot, the Area Set Cache the app holds and the Model
 Statuses validation gave), keyed the same way (`DataKey`). Their jobs share one pool (`Workers`),
-so two recomputes never run side by side: a data change cancels the pending jobs and waits for
-the running ones before the next pool can start.
+so two recomputes never run side by side: a data change cancels the pending jobs, and jobs on the
+new data wait (queued) until the old pool's running jobs have finished. The data change itself
+never waits: a Refresh returns at once even when a job takes minutes.
 """
 
 from __future__ import annotations
@@ -93,11 +94,17 @@ class DataKey:
 
 class Workers:
     """The one background pool (live mode; `executor=None` means no background work). It starts on
-    the first job and shuts down once idle; `use` with new data cancels pending jobs and waits for
-    running ones before any job on the new data can start."""
+    the first job and shuts down once idle. `use` with new data cancels pending jobs and returns at
+    once; the old pool drains in the background (`drain`), and jobs on the new data queue until it
+    has, so pools never overlap."""
 
-    def __init__(self, executor: ExecutorFactory | None = None) -> None:
+    def __init__(
+        self, executor: ExecutorFactory | None = None, *, drain: Callable[[Callable[[], None]], None] | None = None
+    ) -> None:
         self._factory = executor
+        self._drain_in = drain or _in_thread
+        self._draining = False
+        self._queued: list[tuple[Callable[[Future], None], Callable, tuple]] = []
         self._lock = threading.Lock()
         self._use_lock = threading.Lock()
         self._key: DataKey | None = None
@@ -116,14 +123,36 @@ class Workers:
                     return
                 self._key, self._data = key, data
                 pool, self._pool, self._outstanding = self._pool, None, 0
+                superseded, self._queued = self._queued, []
+                if pool is not None:
+                    self._draining = True
+            for on_done, _, _ in superseded:  # queued for data that never got a pool
+                cancelled: Future = Future()
+                cancelled.cancel()
+                on_done(cancelled)
             if pool is not None:
-                pool.shutdown(wait=True, cancel_futures=True)
+                self._drain_in(lambda: self._drain(pool))
+
+    def _drain(self, pool: Executor) -> None:
+        """Wait out the old data's running jobs (pending ones are cancelled), then start the queued
+        jobs on the current data."""
+        try:
+            pool.shutdown(wait=True, cancel_futures=True)
+        finally:
+            with self._lock:
+                self._draining = False
+                queued, self._queued = self._queued, []
+            for on_done, fn, args in queued:
+                self.submit(on_done, fn, *args)
 
     def submit(self, on_done: Callable[[Future], None], fn: Callable, *args) -> None:
         """Run `fn(*args)` in a worker on the current data; `on_done(future)` when it ends (also
         when cancelled by a data change)."""
         with self._lock:
             if self._factory is None or self._data is None:
+                return
+            if self._draining:  # the old data's pool is still finishing its running jobs
+                self._queued.append((on_done, fn, args))
                 return
             if self._pool is None:
                 self._pool = self._factory(_init_worker, (self._data,))
@@ -135,6 +164,7 @@ class Workers:
     def close(self) -> None:
         with self._lock:
             pool, self._pool, self._key = self._pool, None, None
+            self._queued = []
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
 
@@ -150,6 +180,10 @@ class Workers:
                         self._pool, idle = None, True
             if idle:
                 pool.shutdown(wait=False)
+
+
+def _in_thread(job: Callable[[], None]) -> None:
+    threading.Thread(target=job, name="drain-pool", daemon=True).start()
 
 
 # Worker side: each pool process rebuilds the data once, then runs jobs on it.

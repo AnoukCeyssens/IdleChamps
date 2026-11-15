@@ -66,6 +66,8 @@ def _plain_expr(expr: str) -> str:
 
 
 def _allowed_by(restriction: Restriction, champion: Champion, now: int | None) -> bool:
+    if champion.id in restriction.except_ids:
+        return True
     matches = _matches(restriction, champion, now)
     return matches if restriction.kind == "only_allow" else not matches
 
@@ -99,6 +101,11 @@ def _compare(left, comp: str, right) -> bool:
         "==": left == right,
         "!=": left != right,
     }.get(comp, False)
+
+
+# `TimeAvailable(`unit`)`: time since the champion's release or latest rework (as Elminster's
+# patron rule reads it), in that unit.
+_TIME_UNITS = {"days": 365.25, "years": 1.0}
 
 
 class _Unknown(Exception):
@@ -232,6 +239,8 @@ class _Expression:
             return args[0] in self.champion.tags
         if name == "GetStat" and len(args) == 1:
             return self._stat(str(args[0]).lower())
+        if name == "TimeAvailable" and len(args) == 1 and args[0] in _TIME_UNITS:
+            return self._years_since_release_or_rework() * _TIME_UNITS[args[0]]
         if name == "abs" and len(args) == 1:
             return abs(args[0])
         raise _Unknown(name)

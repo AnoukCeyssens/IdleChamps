@@ -297,3 +297,47 @@ def test_offline_mode_header_has_no_refresh(client):
 
     assert rows(page, "refresh-state")[0]["text"] == "Offline mode: reading the game's request log"
     assert rows(page, "refresh-button") == []
+
+
+def _user_details_with(change_defines) -> dict:
+    """The recorded getuserdetails with `change_defines(adventure_defines)` applied."""
+    from fake_game import user_details
+
+    details = user_details()
+    change_defines(details["defines"]["adventure_defines"])
+    return details
+
+
+def test_restrictions_in_the_live_shorthand_shapes_are_read(live):
+    # Live definitions write some restrictions as bare values: `by_ids: [17]` rather than
+    # `{"ids": [17]}`, and `by_expr: "HasTag(...)"` rather than `{"expr": ...}`.
+    def shorthand(defines):
+        first, second = defines[0], defines[1]
+        first["game_changes"] = [*(first.get("game_changes") or ()), {"type": "only_allow_crusaders", "by_ids": [17]}]
+        second["game_changes"] = [
+            *(second.get("game_changes") or ()),
+            {"type": "disallow_crusaders", "by_expr": "HasTag(`small`)"},
+        ]
+
+    live.server.queue("getuserdetails", _user_details_with(shorthand))
+    page = live.start().get("/champions").text
+
+    assert rows(page, "refresh-failed") == []
+    assert len(rows(page, "champion")) == 168
+
+
+def test_an_answer_that_cannot_be_read_shows_the_banner_and_keeps_the_last_data(live):
+    client = live.start()
+
+    def unreadable(defines):
+        del defines[0]["campaign_id"]  # every adventure belongs to a campaign
+
+    live.server.queue("getuserdetails", _user_details_with(unreadable))
+    live.clock.advance(61)
+    page = client.post("/refresh").text
+
+    [banner] = rows(page, "refresh-failed")
+    assert "couldn't be read" in banner["text"]
+    assert len(rows(page, "champion")) == 168  # the last good data stays visible
+    _, button = _header(page)
+    assert button["text"] == "Refresh"  # no cooldown after a failure

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 import time
@@ -43,7 +44,14 @@ def create_app(
     live: showing the Store's cached data and refreshing it from the game servers. What the
     pages show comes from a `Session` (`advisor.session`); this module only renders it."""
     session = Session(results=recompute, focus=focus, steps=steps, store=store)
-    session.load(OfflineGameClient(log_path).fetch() if live is None else live.responses(), refreshed=False)
+    if live is None:
+        session.load(OfflineGameClient(log_path).fetch(), refreshed=False)
+    else:
+        try:
+            session.load(live.responses(), refreshed=False)
+        except Exception:  # a saved answer this version can't read: start empty; the startup Refresh replaces it
+            logging.getLogger(__name__).exception("Saved snapshot couldn't be read; starting without it")
+            session.load({}, refreshed=False)
     app = FastAPI(
         title="Idle Champions Advisor",
         docs_url=None,
@@ -277,7 +285,7 @@ def create_live_app(
     store = Store(data_dir)
     refresher = Refresher(client, store, cooldown=config.cooldown_seconds, clock=clock or time.time, **options)
     refresher.on_refresh(lambda responses: write_history(store, responses))
-    workers = Workers(executor)
+    workers = Workers(executor, drain=background)  # tests drain synchronously, like their Refresh
     return create_app(
         live=refresher,
         recompute=Recompute(RECOMMENDED_GOALS, store=store, workers=workers),

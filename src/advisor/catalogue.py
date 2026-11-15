@@ -6,6 +6,7 @@ import re
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from advisor.area_sets import area_sets_from
 from advisor.request_log import RawResponses
@@ -104,6 +105,8 @@ class Restriction:
     stats: tuple[tuple[str, str, int], ...] = ()  # (stat, comparison, value), e.g. ("con", ">=", 14)
     stats_any: bool = False
     expr: str | None = None
+    # `force_allow_hero` from the same source (e.g. Strahd lets in 102 and 177 whatever the rule says).
+    except_ids: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -418,7 +421,7 @@ def _campaign(define: dict, favor_names: Mapping[int, str] | None = None) -> Cam
         favor_name=(favor_names or {}).get(int(currency)) if currency else None,
         favor_currency_id=int(currency) if currency else None,
         health_curve=next(
-            (_health_curve(g) for g in define.get("game_changes") or () if g.get("type") == "monster_base_stats"),
+            (_health_curve(g) for g in _changes(define.get("game_changes")) if g.get("type") == "monster_base_stats"),
             None,
         ),
     )
@@ -437,25 +440,66 @@ def _patron(define: dict) -> Patron:
 _RESTRICTION_KINDS = {"only_allow_crusaders": "only_allow", "disallow_crusaders": "disallow"}
 
 
-def _restrictions(game_changes: list | None) -> tuple[Restriction, ...]:
+def _changes(game_changes: Any) -> tuple[dict, ...]:
+    """`game_changes` as a flat list of change dicts. Adventures send a list; patrons send a dict
+    keyed by tier (`{"1": [...]}`), whose lists are taken in key order."""
+    if isinstance(game_changes, dict):
+        lists = [game_changes[k] for k in sorted(game_changes, key=str)]
+        return tuple(c for lst in lists if isinstance(lst, list) for c in lst if isinstance(c, dict))
+    if isinstance(game_changes, list):
+        return tuple(c for c in game_changes if isinstance(c, dict))
+    return ()
+
+
+_TAG_WORD = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_\-]*")
+
+
+def _tag_rule(tags: str) -> tuple[tuple[str, ...], str | None]:
+    """`by_tags`: a plain `a|b` list of tags, or a tag expression such as `!(good|evil)`, which
+    becomes an equivalent `HasTag(...)` expression."""
+    if not re.search(r"[!&()]", tags):
+        return tuple(t for t in tags.split("|") if t), None
+    expr = _TAG_WORD.sub(lambda m: f"HasTag(`{m.group(0)}`)", tags)
+    return (), re.sub(r"(?<![|&])([|&])(?![|&])", r"\1\1", expr)
+
+
+def _selector(change: dict, key: str, field: str) -> dict:
+    """A restriction's selector, e.g. `by_ids`. Live definitions also write it as the bare value
+    (`"by_ids": [17]`, `"by_expr": "HasTag(...)"`) instead of `{"ids": [17]}` / `{"expr": ...}`."""
+    value = change.get(key)
+    if not value:
+        return {}
+    return value if isinstance(value, dict) else {field: value}
+
+
+def _restrictions(game_changes: Any) -> tuple[Restriction, ...]:
+    changes = _changes(game_changes)
+    exceptions = frozenset(
+        int(i) for c in changes if c.get("type") == "force_allow_hero" for i in c.get("hero_ids") or ()
+    )
     found = []
-    for change in game_changes or ():
+    for change in changes:
         kind = _RESTRICTION_KINDS.get(change.get("type"))
         if not kind:
             continue
-        by_ids, by_tags = change.get("by_ids") or {}, change.get("by_tags") or {}
-        by_stat, by_expr = change.get("by_stat") or {}, change.get("by_expr") or {}
+        by_ids, by_tags = _selector(change, "by_ids", "ids"), _selector(change, "by_tags", "tags")
+        by_stat, by_expr = _selector(change, "by_stat", "stats"), _selector(change, "by_expr", "expr")
+        tags, tag_expr = _tag_rule(str(by_tags.get("tags") or ""))
+        expr = by_expr.get("expr") or None
+        if tag_expr:
+            expr = f"({tag_expr}) || ({expr})" if expr else tag_expr
         found.append(
             Restriction(
                 kind=kind,
                 ids=frozenset(int(i) for i in by_ids.get("ids") or ()),
-                tags=tuple(t for t in str(by_tags.get("tags") or "").split("|") if t),
+                tags=tags,
                 stats=tuple(
                     (str(s["stat"]).lower(), str(s.get("comp") or ">="), int(s["value"]))
                     for s in by_stat.get("stats") or ()
                 ),
                 stats_any=bool(by_stat.get("pass_any")),
-                expr=by_expr.get("expr") or None,
+                expr=expr,
+                except_ids=exceptions,
             )
         )
     return tuple(found)
@@ -463,7 +507,7 @@ def _restrictions(game_changes: list | None) -> tuple[Restriction, ...]:
 
 def _forced(game_changes: list | None) -> tuple[ForcedChampion, ...]:
     forced = []
-    for change in game_changes or ():
+    for change in _changes(game_changes):
         if change.get("type") != "force_use_heroes":
             continue
         slots = next((s.get("slots") or () for s in change.get("forced_slots") or ()), ())
@@ -511,7 +555,7 @@ def _adventure(
         champion_id=champion_of.get(adventure_id) or champion_of.get(base_id),
         restrictions=_restrictions(define.get("game_changes")),
         forced=_forced(define.get("game_changes")),
-        game_changes=tuple(define.get("game_changes") or ()),
+        game_changes=_changes(define.get("game_changes")),
         area_set_id=int(define["area_set_id"]) if define.get("area_set_id") is not None else None,
         requirements=tuple(define.get("requirements") or ()),
     )
@@ -532,7 +576,7 @@ def _objective_area(objectives: list | None) -> int | None:
 
 
 def _layout(game_changes: list | None) -> tuple[Slot, ...]:
-    formation = next((g["formation"] for g in game_changes or () if g.get("type") == "formation"), None)
+    formation = next((g["formation"] for g in _changes(game_changes) if g.get("type") == "formation"), None)
     return tuple(
         Slot(
             index=i,
@@ -548,7 +592,7 @@ def _layout(game_changes: list | None) -> tuple[Slot, ...]:
 def _blocked_slots(game_changes: list | None) -> frozenset[int]:
     """Seats an escort occupies. Escorts that arrive by area are treated as always there."""
     blocked: set[int] = set()
-    for change in game_changes or ():
+    for change in _changes(game_changes):
         if change.get("type") == "slot_escort":
             blocked.update([change["slot_id"]] if "slot_id" in change else change.get("slot_ids") or ())
         elif change.get("type") == "slot_escort_by_area":
