@@ -17,9 +17,10 @@ def test_refresh_writes_gzipped_versioned_json(live):
     live.start()
 
     files = _persisted(live)
-    assert set(files) == {"definitions.json.gz", "snapshot.json.gz"}
+    assert set(files) == {"definitions.json.gz", "snapshot.json.gz", "history.jsonl.gz"}
     for data in files.values():
-        assert json.loads(gzip.decompress(data))["version"] == 1
+        for line in gzip.decompress(data).decode("utf-8").splitlines():  # history: one JSON per line
+            assert json.loads(line)["version"] == 1
 
 
 def test_no_credential_appears_in_any_persisted_file(live):

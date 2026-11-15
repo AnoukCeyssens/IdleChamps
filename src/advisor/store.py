@@ -7,6 +7,8 @@ field, each file written atomically (temp file + rename):
   delta a Refresh brings.
 - `snapshot.json.gz`: the latest credential-stripped Player Snapshot subset (the Refresh's
   responses minus definitions, shop/promo and server stats).
+- `history.jsonl.gz`: append-only History Records, one JSON line each (one gzip member per
+  record), each line with its own version field.
 - `config.toml`: configurable values (written by hand; there is no settings page).
 
 Credentials are stripped before anything is written.
@@ -28,6 +30,7 @@ from advisor.request_log import strip_credentials
 
 DEFINITIONS_VERSION = 1
 SNAPSHOT_VERSION = 1
+HISTORY_FILE = "history.jsonl.gz"
 
 DEFAULT_DATA_DIR = Path.home() / "Library/Application Support/IdleChampsAdvisor"
 
@@ -90,6 +93,28 @@ class Store:
             {"version": SNAPSHOT_VERSION, "refreshed_at": snapshot.refreshed_at, "responses": responses},
         )
 
+    def append_history(self, record: Mapping[str, Any]) -> None:
+        """Add one History Record. The file is rewritten atomically, so a crash never leaves a
+        torn last line."""
+        path = self.folder / HISTORY_FILE
+        existing = path.read_bytes() if path.exists() else b""
+        line = json.dumps(strip_credentials(dict(record)), sort_keys=True) + "\n"
+        self._write_bytes(HISTORY_FILE, existing + gzip.compress(line.encode("utf-8"), mtime=0))
+
+    def load_history(self) -> list[dict]:
+        """Every History Record, oldest first (lines that can't be read are skipped)."""
+        try:
+            text = gzip.decompress((self.folder / HISTORY_FILE).read_bytes()).decode("utf-8")
+        except (OSError, EOFError, ValueError):
+            return []
+        records = []
+        for line in text.splitlines():
+            try:
+                records.append(json.loads(line))
+            except ValueError:
+                continue
+        return records
+
     def _read(self, name: str, version: int) -> dict | None:
         path = self.folder / name
         try:
@@ -99,8 +124,10 @@ class Store:
         return data if isinstance(data, dict) and data.get("version") == version else None
 
     def _write(self, name: str, data: dict) -> None:
+        self._write_bytes(name, gzip.compress(json.dumps(strip_credentials(data)).encode("utf-8"), mtime=0))
+
+    def _write_bytes(self, name: str, payload: bytes) -> None:
         self.folder.mkdir(parents=True, exist_ok=True)
-        payload = gzip.compress(json.dumps(strip_credentials(data)).encode("utf-8"), mtime=0)
         fd, tmp = tempfile.mkstemp(dir=self.folder, prefix=f".{name}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as out:

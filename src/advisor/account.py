@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections import defaultdict
 from collections.abc import Mapping
@@ -51,9 +53,45 @@ class Account:
     event_tiers: Mapping[int, int] = field(default_factory=dict)  # event champion id -> tier finished
     unlocked_patron_ids: frozenset[int] = frozenset()
     running_event_ids: frozenset[int] = frozenset()
+    familiar_ids: frozenset[int] = frozenset()  # familiars owned
+    modron_cores: Mapping[int, int] = field(default_factory=dict)  # core id -> experience (its level)
+    completed_patron_adventures: Mapping[int, object] = field(default_factory=dict)  # campaign id -> as sent
 
     def owns(self, champion_id: int) -> bool:
         return champion_id in self.champions
+
+    def owned_state(self) -> dict:
+        """The recommendation-relevant subset of the account, as plain JSON-ready data: owned
+        champions and levels, gear, feats, specializations, familiars, modron cores, adventure /
+        variant / patron completion and `highest_area` stats. Currencies are left out on purpose."""
+        return {
+            "champions": {
+                str(c.id): {
+                    "level": c.level,
+                    "specializations": sorted(c.specialization_choices),
+                    "gear": {str(s): [g.rarity, g.level, g.gild] for s, g in sorted(c.gear.items())},
+                    "feats": sorted(c.feats),
+                    "equipped_feats": sorted(c.equipped_feats),
+                    "feat_slots": c.feat_slots,
+                }
+                for c in sorted(self.champions.values(), key=lambda c: c.id)
+            },
+            "familiars": sorted(self.familiar_ids),
+            "modron_cores": {str(k): v for k, v in sorted(self.modron_cores.items())},
+            "completed_adventure_ids": sorted(self.completed_adventure_ids),
+            "completed_patron_adventures": {str(k): v for k, v in sorted(self.completed_patron_adventures.items())},
+            "unlocked_patron_ids": sorted(self.unlocked_patron_ids),
+            "event_tiers": {str(k): v for k, v in sorted(self.event_tiers.items())},
+            "best_areas": {str(k): v for k, v in sorted(self.best_areas.items())},
+        }
+
+    @property
+    def recommendation_key(self) -> str:
+        """Hash of `owned_state()`: changes only when something a recommendation depends on
+        changes, so a currency-only Refresh keeps it (results are keyed on it, with the
+        definitions checksum)."""
+        canonical = json.dumps(self.owned_state(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def parse_account(raw: RawResponses) -> Account:
@@ -79,7 +117,25 @@ def parse_account(raw: RawResponses) -> Account:
         running_event_ids=frozenset(
             int(e["event_id"]) for e in (details.get("events_details") or {}).get("active_events") or ()
         ),
+        familiar_ids=frozenset(int(f["familiar_id"]) for f in details.get("familiars") or ()),
+        modron_cores={
+            int(core.get("core_id") or key): int(float(core.get("exp_total") or 0))
+            for key, core in _entries(details.get("modron_saves"))
+            if isinstance(core, dict)
+        },
+        completed_patron_adventures={
+            int(c["campaign_id"]): c["completed_patron_adventure_ids"]
+            for c in (raw.get("getcampaigndetails") or {}).get("campaigns") or ()
+            if c.get("completed_patron_adventure_ids")
+        },
     )
+
+
+def _entries(value) -> list:
+    """(key, item) pairs of a value the game sends as either an object or an array."""
+    if isinstance(value, dict):
+        return list(value.items())
+    return list(enumerate(value or ()))
 
 
 _BEST_AREA = re.compile(r"highest_area_completed_ever_c(\d+)")

@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from advisor.account import Account, parse_account
 from advisor.catalogue import GEAR_SLOTS, ROLE_TAGS, Catalogue, parse_catalogue
 from advisor.explorer import RUN_GOALS, adventure_node, tree
+from advisor.history import write_history
 from advisor.game_client import DEFAULT_LOG, HttpTransport, LiveGameClient, OfflineGameClient, Transport
 from advisor.refresh import Refresher
 from advisor.request_log import RawResponses
@@ -146,9 +147,9 @@ def create_live_app(
         transport or HttpTransport(), config.request_log, clock=clock or time.monotonic, sleep=sleep
     )
     options = {"background": background} if background else {}
-    refresher = Refresher(
-        client, Store(data_dir), cooldown=config.cooldown_seconds, clock=clock or time.time, **options
-    )
+    store = Store(data_dir)
+    refresher = Refresher(client, store, cooldown=config.cooldown_seconds, clock=clock or time.time, **options)
+    refresher.on_refresh(lambda responses: write_history(store, responses))
     return create_app(live=refresher)
 
 
