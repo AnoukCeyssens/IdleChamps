@@ -11,6 +11,7 @@ field, each file written atomically (temp file + rename):
   they were computed for (recommendation key, definitions checksum, code fingerprint).
 - `history.jsonl.gz`: append-only History Records, one JSON line each (one gzip member per
   record), each line with its own version field.
+- `focus.json.gz`: the Focus Sets the player pinned, per Run Goal (`next_steps.py`).
 - `config.toml`: configurable values (written by hand; there is no settings page).
 
 Credentials are stripped before anything is written.
@@ -33,6 +34,7 @@ from advisor.request_log import strip_credentials
 DEFINITIONS_VERSION = 1
 SNAPSHOT_VERSION = 1
 RESULTS_VERSION = 1
+FOCUS_VERSION = 1
 HISTORY_FILE = "history.jsonl.gz"
 
 DEFAULT_DATA_DIR = Path.home() / "Library/Application Support/IdleChampsAdvisor"
@@ -103,6 +105,14 @@ class Store:
 
     def save_results(self, key: list, entries: list) -> None:
         self._write("results.json.gz", {"version": RESULTS_VERSION, "key": key, "results": entries})
+
+    def load_focus(self) -> dict[str, tuple[int, ...]] | None:
+        """The pinned Focus Sets ({Run Goal: adventure ids}), or None."""
+        data = self._read("focus.json.gz", FOCUS_VERSION)
+        return {goal: tuple(int(i) for i in ids) for goal, ids in data["focus"].items()} if data else None
+
+    def save_focus(self, focus: Mapping[str, list[int]]) -> None:
+        self._write("focus.json.gz", {"version": FOCUS_VERSION, "focus": dict(focus)})
 
     def append_history(self, record: Mapping[str, Any]) -> None:
         """Add one History Record. The file is rewritten atomically, so a crash never leaves a

@@ -31,6 +31,10 @@
   .head .context { color: var(--muted); font-size: 13px; }
   .head h1 { margin: 2px 0 6px; }
   .head .restrictions { color: var(--muted); font-size: 13px; margin: 4px 0; white-space: pre-line; }
+  .head .focus-toggles { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
+  .head .focus-toggles form { margin: 0; }
+  .head .focus-toggles button { font: inherit; font-size: 12px; padding: 1px 10px; border: 1px solid var(--line); border-radius: 12px; background: #fff; cursor: pointer; }
+  .head .focus-toggles button.pinned { border-color: var(--accent); color: var(--accent); }
   .chips, .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
   .chip { padding: 2px 10px; border: 1px solid var(--line); border-radius: 12px; color: var(--fg); text-decoration: none; font-size: 13px; }
   .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -94,6 +98,13 @@
         · <span class="badge {{ node.completion.kind }}" data-row="header-badge">{{ node.completion.label }}</span>
       </div>
       {% if adv.restrictions_text %}<p class="restrictions" data-row="header-restrictions">{{ adv.restrictions_text }}</p>{% endif %}
+      <div class="focus-toggles">
+        {% for g, pinned in focus_goals %}
+        <form method="post" action="/adventures/{{ adv.id }}/focus?goal={{ g | urlencode }}&pin={{ 'false' if pinned else 'true' }}">
+          <button type="submit" data-row="focus-toggle" class="{{ 'pinned' if pinned }}">{{ 'Unpin from' if pinned else 'Pin to' }} {{ g }} Focus Set</button>
+        </form>
+        {% endfor %}
+      </div>
     </div>
 
     <nav class="chips" aria-label="Patron">

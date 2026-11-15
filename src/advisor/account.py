@@ -53,6 +53,9 @@ class ModronSave:
     experience: int
     grid: tuple[tuple[int, ...], ...] = ()
     area_goal: int | None = None
+    # Next Steps' Focus Set defaults (#35); not part of `owned_state()`.
+    reset_enabled: bool = False  # `properties.toggle_preferences.reset`: the core resets at its area goal
+    campaign_ids: frozenset[int] = frozenset()  # campaigns it has a formation save for (`formation_saves` keys)
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,11 @@ class Account:
     modron_saves: Mapping[int, ModronSave] = field(default_factory=dict)  # core id -> saved setup
     server_time: int | None = None  # the snapshot's server clock (Unix seconds), `getuserdetails.current_time`
     instances: tuple[GameInstance, ...] = ()  # live runs; not part of `owned_state()`
+    # Read by Next Steps (#35); like currencies, not part of `owned_state()`.
+    last_played_adventure_id: int | None = None  # the active instance's adventure
+    favor_earned: Mapping[int, float] = field(default_factory=dict)  # reset currency id -> total earned
+    buff_inventory: Mapping[int, int] = field(default_factory=dict)  # buff id (contracts, potions) -> owned
+    chests: Mapping[int, int] = field(default_factory=dict)  # chest type id -> unopened
 
     def owns(self, champion_id: int) -> bool:
         return champion_id in self.champions
@@ -167,7 +175,42 @@ def parse_account(raw: RawResponses) -> Account:
         },
         server_time=int(raw["getuserdetails"]["current_time"]) if raw["getuserdetails"].get("current_time") else None,
         instances=tuple(i for i in map(_instance, details.get("game_instances") or ()) if i),
+        last_played_adventure_id=_last_played(details),
+        favor_earned={
+            int(c["currency_id"]): _number(c.get("total_earned"))
+            for c in details.get("reset_currencies") or ()
+            if isinstance(c, dict) and c.get("currency_id") is not None
+        },
+        buff_inventory={
+            int(b["buff_id"]): int(b.get("inventory_amount") or 0)
+            for b in details.get("buffs") or ()
+            if isinstance(b, dict) and b.get("buff_id") is not None
+        },
+        chests={int(k): int(v or 0) for k, v in _entries(details.get("chests")) if str(k).isdigit()},
     )
+
+
+def _keys(value) -> list:
+    """An object's keys; the game sends an empty object as `[]`."""
+    return list(value) if isinstance(value, dict) else []
+
+
+def _number(value) -> float:
+    """A currency amount, sent as a string, often in scientific notation."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _last_played(details: Mapping) -> int | None:
+    """The adventure of the active instance, else the account's `current_adventure_id`."""
+    active = str(details.get("active_game_instance_id") or "")
+    for instance in details.get("game_instances") or ():
+        if str(instance.get("game_instance_id")) == active and instance.get("current_adventure_id"):
+            return int(instance["current_adventure_id"])
+    current = details.get("current_adventure_id")
+    return int(current) if current and int(current) > 0 else None
 
 
 def _modron_save(key, core: Mapping) -> ModronSave:
@@ -178,6 +221,8 @@ def _modron_save(key, core: Mapping) -> ModronSave:
         experience=int(float(core.get("exp_total") or 0)),
         grid=grid,
         area_goal=int(goal) if goal.isdigit() and int(goal) > 0 else None,
+        reset_enabled=bool(((core.get("properties") or {}).get("toggle_preferences") or {}).get("reset")),
+        campaign_ids=frozenset(int(k) for k in _keys(core.get("formation_saves")) if str(k).isdigit()),
     )
 
 

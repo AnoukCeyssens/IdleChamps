@@ -15,9 +15,10 @@ from fastapi.templating import Jinja2Templates
 from advisor.account import Account, parse_account
 from advisor.catalogue import GEAR_SLOTS, ROLE_TAGS, Catalogue, parse_catalogue
 from advisor.champion_models import ChampionModels
-from advisor.explorer import RUN_GOALS, adventure_node, tree
+from advisor.explorer import RUN_GOALS, adventure_node, is_running, tree
 from advisor.hints import hints as one_change_hints
 from advisor.history import write_history
+from advisor.next_steps import NEXT_STEP_GOALS, TOP_STEPS, FocusSets, Steps, measure_adventure, next_steps
 from advisor.game_client import DEFAULT_LOG, HttpTransport, LiveGameClient, OfflineGameClient, Transport
 from advisor.recommendation import recommend, with_search_problem
 from advisor.recompute import ExecutorFactory, Recompute, process_pool
@@ -34,7 +35,12 @@ _RECOMMENDED_GOALS += ("Push",)  # with its Push Verdict (#32)
 
 
 def create_app(
-    log_path: Path | None = None, *, live: Refresher | None = None, recompute: Recompute | None = None
+    log_path: Path | None = None,
+    *,
+    live: Refresher | None = None,
+    recompute: Recompute | None = None,
+    focus: FocusSets | None = None,
+    steps: Steps | None = None,
 ) -> FastAPI:
     """The advisor, either in offline mode on a request log (the game's or a fixture), or
     live: showing the Store's cached data and refreshing it from the game servers.
@@ -45,6 +51,8 @@ def create_app(
     models = ChampionModels(catalogue, account)
     results = recompute or Recompute(_RECOMMENDED_GOALS)
     hints: dict[tuple, tuple] = {}  # "What would make this better", computed when a recommendation is opened
+    focus = focus or FocusSets()  # Next Steps' Focus Sets (#35)
+    steps = steps or Steps()  # each Focus adventure's measured one-changes
 
     def load(responses: RawResponses, *, refreshed: bool = True) -> None:
         """(Re)build everything the pages show from raw responses (at start and after a Refresh)."""
@@ -57,6 +65,8 @@ def create_app(
         models = ChampionModels(catalogue, account)
         results.update(raw, catalogue, account, models, precompute=refreshed)
         hints.clear()
+        steps.update(raw, account)
+        steps.ensure((a, g) for g in NEXT_STEP_GOALS for a in focus.get(catalogue, account, g))
 
     load(raw, refreshed=False)
     app = FastAPI(
@@ -64,7 +74,7 @@ def create_app(
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        lifespan=_refresh_on_start(live, results) if live else None,
+        lifespan=_refresh_on_start(live, results, steps) if live else None,
     )
     if live is None:
         app.state.header = lambda: {"mode": "offline"}
@@ -114,6 +124,7 @@ def create_app(
             "patron": patron,
             "recommendation": recommendation,
             "stale": stale,  # from before the running recompute
+            "focus_goals": [(g, found.id in focus.get(catalogue, account, g)) for g in NEXT_STEP_GOALS],
             "patrons": [
                 {"patron": catalogue.patron(pid), "area": area, "locked": pid not in account.unlocked_patron_ids}
                 for pid, area in found.patron_objectives.items()
@@ -154,8 +165,64 @@ def create_app(
             proven = recommend(catalogue, account, found, goal, patron, models=models, solver="exact")
             results.put(found, goal, patron, proven)
             hints.pop((found.id, goal, patron), None)  # gains are measured against the shown formation
+            if patron is None:
+                steps.drop(found.id, goal)
         query = f"goal={quote(goal)}" + (f"&patron={patron}" if patron is not None else "")
         return RedirectResponse(f"/adventures/{found.id}?{query}", status_code=303)
+
+    @app.post("/adventures/{adventure_id}/focus")
+    def pin_focus(request: Request, adventure_id: int, goal: str, pin: bool = True) -> RedirectResponse:
+        """Pin an adventure to a Run Goal's Focus Set, or unpin it (from the adventure header or
+        the Next Steps tab)."""
+        found = catalogue.adventure(adventure_id)
+        if found is None or goal not in NEXT_STEP_GOALS:
+            raise HTTPException(404, "No such adventure or Next Steps tab")
+        focus.pin(catalogue, account, goal, found.id, pin)
+        steps.ensure([(found.id, goal)] if pin else [])
+        back = urlsplit(request.headers.get("referer") or f"/adventures/{found.id}")
+        return RedirectResponse((back.path or "/") + (f"?{back.query}" if back.query else ""), status_code=303)
+
+    @app.get("/next-steps", response_class=HTMLResponse)
+    def next_steps_page(request: Request, goal: str = NEXT_STEP_GOALS[0], all: bool = False) -> HTMLResponse:
+        goal = goal if goal in NEXT_STEP_GOALS else NEXT_STEP_GOALS[0]
+        adventures = [a for i in focus.get(catalogue, account, goal) if (a := catalogue.adventure(i))]
+        context = {
+            "goal": goal,
+            "goals": NEXT_STEP_GOALS,
+            "all": all,
+            "focus": [{"adventure": a, "running": is_running(catalogue, account, a)} for a in adventures],
+        }
+        return _TEMPLATES.TemplateResponse(request, "next_steps.html", context)
+
+    @app.get("/next-steps/steps", response_class=HTMLResponse)
+    def next_steps_list(request: Request, goal: str = NEXT_STEP_GOALS[0], all: bool = False) -> HTMLResponse:
+        """The ranked steps, loaded by the Next Steps tab; measured in the background in live mode,
+        on demand otherwise."""
+        goal = goal if goal in NEXT_STEP_GOALS else NEXT_STEP_GOALS[0]
+        adventures = [a for i in focus.get(catalogue, account, goal) if (a := catalogue.adventure(i))]
+        steps.ensure((a.id, goal) for a in adventures)
+        measured, waiting = {}, 0
+        for adventure in adventures:
+            found = steps.get(adventure.id, goal)
+            if found is None and steps.pending(adventure.id, goal):
+                waiting += 1
+                continue
+            if found is None:
+                rec, stale = results.get(adventure, goal)
+                found = measure_adventure(catalogue, account, rec, models=models)
+                if not stale:
+                    steps.put(adventure.id, goal, found)
+            measured[adventure.id] = found
+        ranked = () if waiting else next_steps(catalogue, account, adventures, measured)
+        context = {
+            "goal": goal,
+            "all": all,
+            "waiting": waiting,
+            "focus_count": len(adventures),
+            "steps": ranked if all else ranked[:TOP_STEPS],
+            "total": len(ranked),
+        }
+        return _TEMPLATES.TemplateResponse(request, "_next_steps.html", context)
 
     @app.get("/champions/{champion_id}", response_class=HTMLResponse)
     def champion_detail(request: Request, champion_id: int) -> HTMLResponse:
@@ -200,6 +267,7 @@ def create_live_app(
     sleep: Callable[[float], None] = time.sleep,
     background: Callable | None = None,
     executor: ExecutorFactory = process_pool,
+    steps_executor: ExecutorFactory = process_pool,
 ) -> FastAPI:
     """The advisor in live mode on an app data folder (config, caches)."""
     config = load_config(data_dir, DEFAULT_LOG)
@@ -210,15 +278,21 @@ def create_live_app(
     store = Store(data_dir)
     refresher = Refresher(client, store, cooldown=config.cooldown_seconds, clock=clock or time.time, **options)
     refresher.on_refresh(lambda responses: write_history(store, responses))
-    return create_app(live=refresher, recompute=Recompute(_RECOMMENDED_GOALS, store=store, executor=executor))
+    return create_app(
+        live=refresher,
+        recompute=Recompute(_RECOMMENDED_GOALS, store=store, executor=executor),
+        focus=FocusSets(store),
+        steps=Steps(steps_executor),  # Next Steps' Focus adventures, measured in the background
+    )
 
 
-def _refresh_on_start(live: Refresher, results: Recompute):
+def _refresh_on_start(live: Refresher, results: Recompute, steps: Steps):
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         live.start()
         yield
         results.close()
+        steps.close()
 
     return lifespan
 

@@ -70,6 +70,7 @@ class Campaign:
     name: str
     event_id: int | None = None  # set on event campaigns
     favor_name: str | None = None  # the reset currency (Favor) earned here, e.g. "Torm's Favor"
+    favor_currency_id: int | None = None  # its `reset_currency_id` (Account.favor_earned is keyed on it)
     health_curve: HealthCurve | None = None  # the campaign's `monster_base_stats` override, if any
 
     @property
@@ -370,6 +371,7 @@ def _campaign(define: dict, favor_names: Mapping[int, str] | None = None) -> Cam
         name=define["name"],
         event_id=int(event_id) if event_id is not None else None,
         favor_name=(favor_names or {}).get(int(currency)) if currency else None,
+        favor_currency_id=int(currency) if currency else None,
         health_curve=next(
             (_health_curve(g) for g in define.get("game_changes") or () if g.get("type") == "monster_base_stats"),
             None,
