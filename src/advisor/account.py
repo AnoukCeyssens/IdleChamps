@@ -56,6 +56,20 @@ class ModronSave:
 
 
 @dataclass(frozen=True)
+class GameInstance:
+    """One live run (`game_instances[]`): where it is, the formation in play, and its BUD."""
+
+    id: int
+    adventure_id: int
+    patron_id: int | None
+    current_area: int
+    highest_area: int
+    formation: tuple[int, ...]  # champion id per slot, -1 empty
+    bud: float | None  # `this_reset_highest_damage_dealt`
+    bud_champion_id: int | None  # the champion who set it
+
+
+@dataclass(frozen=True)
 class Account:
     champions: Mapping[int, OwnedChampion]  # owned champions by champion id
     completed_adventure_ids: frozenset[int] = frozenset()  # free play, variants, Running Event
@@ -68,6 +82,7 @@ class Account:
     completed_patron_adventures: Mapping[int, object] = field(default_factory=dict)  # campaign id -> as sent
     modron_saves: Mapping[int, ModronSave] = field(default_factory=dict)  # core id -> saved setup
     server_time: int | None = None  # the snapshot's server clock (Unix seconds), `getuserdetails.current_time`
+    instances: tuple[GameInstance, ...] = ()  # live runs; not part of `owned_state()`
 
     def owns(self, champion_id: int) -> bool:
         return champion_id in self.champions
@@ -146,6 +161,7 @@ def parse_account(raw: RawResponses) -> Account:
             if c.get("completed_patron_adventure_ids")
         },
         server_time=int(raw["getuserdetails"]["current_time"]) if raw["getuserdetails"].get("current_time") else None,
+        instances=tuple(i for i in map(_instance, details.get("game_instances") or ()) if i),
     )
 
 
@@ -158,6 +174,27 @@ def _modron_save(key, core: Mapping) -> ModronSave:
         grid=grid,
         area_goal=int(goal) if goal.isdigit() and int(goal) > 0 else None,
     )
+
+
+def _instance(instance: dict) -> GameInstance | None:
+    stats = instance.get("stats") or {}
+    try:
+        bud = float(stats.get("this_reset_highest_damage_dealt"))
+    except (TypeError, ValueError):
+        bud = None
+    try:
+        return GameInstance(
+            id=int(instance["game_instance_id"]),
+            adventure_id=int(instance.get("current_adventure_id") or 0),
+            patron_id=int(instance.get("current_patron_id") or 0) or None,
+            current_area=int(instance.get("current_area") or 0),
+            highest_area=int(instance.get("highest_area") or 0),
+            formation=tuple(int(c) for c in instance.get("formation") or ()),
+            bud=bud if bud and bud > 0 else None,
+            bud_champion_id=int(stats.get("this_reset_highest_damage_dealt_hero_id") or 0) or None,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _entries(value) -> list:

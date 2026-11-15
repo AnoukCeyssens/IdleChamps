@@ -206,6 +206,13 @@ class ChampionModels:
                 *_SETUP_ASSUMPTIONS,
                 *common,
             )
+        if run_goal == "Push":
+            return (
+                "Push is scored on Main DPS damage, with stacking effects at max_stacks (Not Modelled champions' "
+                "stacks are not counted yet).",
+                *_SETUP_ASSUMPTIONS,
+                *common,
+            )
         if run_goal == "Gem Farm":
             return (*GEM_FARM_ASSUMPTIONS, *common)
         return (*_SETUP_ASSUMPTIONS, *common)

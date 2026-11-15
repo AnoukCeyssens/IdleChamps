@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -26,8 +26,9 @@ from advisor.store import Store, load_config
 _TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
 _TEMPLATES.env.filters["sci"] = lambda x: f"{x:,.0f}" if 100 <= x < 1e6 else f"{x:.3g}" if x < 100 else f"{x:.2e}".replace("e+", "e")
 
-# Run Goals whose tab shows a Formation Recommendation so far (Push: #32).
+# Run Goals whose tab shows a Formation Recommendation.
 _RECOMMENDED_GOALS = ("Gem Farm", "Gold Farm")
+_RECOMMENDED_GOALS += ("Push",)  # with its Push Verdict (#32)
 
 
 def create_app(log_path: Path | None = None, *, live: Refresher | None = None) -> FastAPI:
@@ -115,6 +116,22 @@ def create_app(log_path: Path | None = None, *, live: Refresher | None = None) -
         if key not in recommendations:
             recommendations[key] = recommend(catalogue, account, found, goal, patron, models=models)
         return recommendations[key]
+
+    @app.post("/adventures/{adventure_id}/prove")
+    def prove(adventure_id: int, goal: str = RUN_GOALS[0], patron: int | None = None) -> RedirectResponse:
+        """"Prove it's the best" (#31): the exact solve (~60 s) replaces the cached recommendation;
+        it keeps the fast formation unless it finds a better one."""
+        found = catalogue.adventure(adventure_id)
+        if found is None:
+            raise HTTPException(404, "No such adventure")
+        goal = goal if goal in RUN_GOALS else RUN_GOALS[0]
+        patron = patron if patron in found.patron_objectives else None
+        if goal in _RECOMMENDED_GOALS:
+            recommendations[(found.id, goal, patron)] = recommend(
+                catalogue, account, found, goal, patron, models=models, solver="exact"
+            )
+        query = f"goal={quote(goal)}" + (f"&patron={patron}" if patron is not None else "")
+        return RedirectResponse(f"/adventures/{found.id}?{query}", status_code=303)
 
     @app.get("/champions/{champion_id}", response_class=HTMLResponse)
     def champion_detail(request: Request, champion_id: int) -> HTMLResponse:
