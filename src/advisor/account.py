@@ -51,6 +51,7 @@ class Account:
     event_tiers: Mapping[int, int] = field(default_factory=dict)  # event champion id -> tier finished
     unlocked_patron_ids: frozenset[int] = frozenset()
     running_event_ids: frozenset[int] = frozenset()
+    server_time: int | None = None  # the snapshot's server clock (Unix seconds), `getuserdetails.current_time`
 
     def owns(self, champion_id: int) -> bool:
         return champion_id in self.champions
@@ -79,6 +80,7 @@ def parse_account(raw: RawResponses) -> Account:
         running_event_ids=frozenset(
             int(e["event_id"]) for e in (details.get("events_details") or {}).get("active_events") or ()
         ),
+        server_time=int(raw["getuserdetails"]["current_time"]) if raw["getuserdetails"].get("current_time") else None,
     )
 
 

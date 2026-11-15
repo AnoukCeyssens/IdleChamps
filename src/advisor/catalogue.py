@@ -37,6 +37,11 @@ class Champion:
     seat: int
     tags: frozenset[str]
     source: ChampionSource
+    base_damage: float = 0.0
+    ability_scores: Mapping[str, int] = field(default_factory=dict, hash=False)  # "str", "dex", ... (character sheet)
+    age: int | None = None
+    date_available: str = ""  # "YYYY-MM-DD hh:mm:ss"
+    last_rework_date: str = ""
 
     @property
     def role_tags(self) -> tuple[str, ...]:
@@ -50,6 +55,7 @@ class Campaign:
     id: int
     name: str
     event_id: int | None = None  # set on event campaigns
+    favor_name: str | None = None  # the reset currency (Favor) earned here, e.g. "Torm's Favor"
 
     @property
     def is_event(self) -> bool:
@@ -68,6 +74,30 @@ class Slot:
 
 
 @dataclass(frozen=True)
+class Restriction:
+    """One machine-readable rule on which champions may be used (`only_allow_crusaders` or
+    `disallow_crusaders`). A champion matches when any of its criteria hold: listed by id, carries
+    one of the tags, meets the stat checks (all of them, or any with `stats_any`), or satisfies
+    `expr`. Evaluated by `advisor.restrictions`."""
+
+    kind: str  # "only_allow" | "disallow"
+    ids: frozenset[int] = frozenset()
+    tags: tuple[str, ...] = ()
+    stats: tuple[tuple[str, str, int], ...] = ()  # (stat, comparison, value), e.g. ("con", ">=", 14)
+    stats_any: bool = False
+    expr: str | None = None
+
+
+@dataclass(frozen=True)
+class ForcedChampion:
+    """A champion the adventure puts in the formation (`force_use_heroes`), optionally in a fixed slot."""
+
+    champion_id: int
+    slot: int | None = None
+    start_level: int | None = None
+
+
+@dataclass(frozen=True)
 class Adventure:
     id: int
     name: str
@@ -79,6 +109,8 @@ class Adventure:
     layout: tuple[Slot, ...]
     blocked_slots: frozenset[int]  # seats taken by an escort
     champion_id: int | None = None  # the event champion whose adventure this is, if any
+    restrictions: tuple[Restriction, ...] = ()
+    forced: tuple[ForcedChampion, ...] = ()
 
     @property
     def is_variant(self) -> bool:
@@ -89,6 +121,7 @@ class Adventure:
 class Patron:
     id: int
     name: str
+    restrictions: tuple[Restriction, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -118,6 +151,7 @@ class GearItem:
     rarity: int  # 1 Common, 2 Uncommon, 3 Rare, 4 Epic
     name: str
     description: str
+    effects: tuple[str, ...] = ()  # effect strings at this rarity, e.g. "global_dps_multiplier_mult,10"
 
 
 @dataclass(frozen=True)
@@ -126,6 +160,30 @@ class Feat:
     champion_id: int
     name: str
     description: str
+    effects: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Upgrade:
+    """A level-gated champion upgrade. `effect` is the game's compact effect string: a key with its
+    parameters (`hero_dps_multiplier_mult,400`) or a link to an ability (`effect_def,568`)."""
+
+    id: int
+    champion_id: int
+    required_level: int
+    effect: str
+    name: str = ""
+    is_specialization: bool = False
+
+
+@dataclass(frozen=True)
+class EffectDefinition:
+    """An ability from `effect_defines`: its effect keys as published (each an `effect_string` plus
+    optional fields such as `targets`), and its description."""
+
+    id: int
+    effect_keys: tuple[Mapping, ...]
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -142,6 +200,12 @@ class Catalogue:
 
     # Feats by id; only those whose feat definitions have been loaded.
     feats: Mapping[int, Feat] = field(default_factory=dict)
+    # Upgrades and abilities by id; only those whose definitions have been loaded.
+    upgrades: Mapping[int, Upgrade] = field(default_factory=dict)
+    effects: Mapping[int, EffectDefinition] = field(default_factory=dict)
+
+    def upgrades_of(self, champion_id: int) -> tuple[Upgrade, ...]:
+        return tuple(sorted((u for u in self.upgrades.values() if u.champion_id == champion_id), key=lambda u: u.id))
 
     def gear_item(self, champion_id: int, slot: int, rarity: int) -> GearItem | None:
         return self.gear.get((champion_id, slot, rarity))
@@ -188,12 +252,19 @@ def parse_catalogue(raw: RawResponses) -> Catalogue:
         specializations=_specializations(_table(raw, "upgrade_defines")),
         gear=_gear(_table(raw, "loot_defines")),
         feats=_feats(_table(raw, "hero_feat_defines")),
-        campaigns=tuple(sorted(map(_campaign, campaign_defines), key=lambda c: c.id)),
+        upgrades=_upgrades(_table(raw, "upgrade_defines")),
+        effects=_effects(_table(raw, "effect_defines")),
+        campaigns=tuple(
+            sorted(
+                (_campaign(c, _favor_names(_table(raw, "reset_currency_defines"))) for c in campaign_defines),
+                key=lambda c: c.id,
+            )
+        ),
         adventures=tuple(
             _adventure(a, adventure_defines, campaign_layouts, champion_of)
             for _, a in sorted(adventure_defines.items())
         ),
-        patrons={**_PATRON_NAMES, **{p.id: p for p in map(_patron, _table(raw, "patron_defines"))}},
+        patrons={**_PATRONS, **{p.id: p for p in map(_patron, _table(raw, "patron_defines"))}},
     )
 
 
@@ -202,18 +273,87 @@ _PATRON_NAMES = {
     i: Patron(i, name) for i, name in enumerate(("Mirt", "Vajra", "Strahd", "Zariel", "Elminster"), 1)
 }
 
-def _campaign(define: dict) -> Campaign:
+# Patron restrictions, used when `patron_defines` isn't loaded (research/push-area-reach.md:
+# Mirt good or evil; Vajra CON 14+; Strahd INT 13+; Zariel STR 10+ and CHA 13+; Elminster
+# released or reworked in the last 3 years).
+_PATRON_RESTRICTIONS = {
+    1: (Restriction("only_allow", tags=("good", "evil")),),
+    2: (Restriction("only_allow", stats=(("con", ">=", 14),)),),
+    3: (Restriction("only_allow", stats=(("int", ">=", 13),)),),
+    4: (Restriction("only_allow", stats=(("str", ">=", 10), ("cha", ">=", 13))),),
+    5: (Restriction("only_allow", expr="years_since_release_or_rework <= 3"),),
+}
+_PATRONS = {i: Patron(i, p.name, _PATRON_RESTRICTIONS.get(i, ())) for i, p in _PATRON_NAMES.items()}
+
+
+def _favor_names(rows: list[dict]) -> dict[int, str]:
+    return {int(r["id"]): r.get("name") or "" for r in rows}
+
+
+def _campaign(define: dict, favor_names: Mapping[int, str] | None = None) -> Campaign:
     properties = define.get("properties") or {}
     event_id = properties.get("event_id") if properties.get("is_event") else None
+    currency = define.get("reset_currency_id")
     return Campaign(
         id=int(define["id"]),
         name=define["name"],
         event_id=int(event_id) if event_id is not None else None,
+        favor_name=(favor_names or {}).get(int(currency)) if currency else None,
     )
 
 
 def _patron(define: dict) -> Patron:
-    return Patron(id=int(define["id"]), name=define["name"])
+    patron_id = int(define["id"])
+    return Patron(
+        id=patron_id,
+        name=define["name"],
+        restrictions=_restrictions(define.get("game_changes")) or _PATRON_RESTRICTIONS.get(patron_id, ()),
+    )
+
+
+_RESTRICTION_KINDS = {"only_allow_crusaders": "only_allow", "disallow_crusaders": "disallow"}
+
+
+def _restrictions(game_changes: list | None) -> tuple[Restriction, ...]:
+    found = []
+    for change in game_changes or ():
+        kind = _RESTRICTION_KINDS.get(change.get("type"))
+        if not kind:
+            continue
+        by_ids, by_tags = change.get("by_ids") or {}, change.get("by_tags") or {}
+        by_stat, by_expr = change.get("by_stat") or {}, change.get("by_expr") or {}
+        found.append(
+            Restriction(
+                kind=kind,
+                ids=frozenset(int(i) for i in by_ids.get("ids") or ()),
+                tags=tuple(t for t in str(by_tags.get("tags") or "").split("|") if t),
+                stats=tuple(
+                    (str(s["stat"]).lower(), str(s.get("comp") or ">="), int(s["value"]))
+                    for s in by_stat.get("stats") or ()
+                ),
+                stats_any=bool(by_stat.get("pass_any")),
+                expr=by_expr.get("expr") or None,
+            )
+        )
+    return tuple(found)
+
+
+def _forced(game_changes: list | None) -> tuple[ForcedChampion, ...]:
+    forced = []
+    for change in game_changes or ():
+        if change.get("type") != "force_use_heroes":
+            continue
+        slots = next((s.get("slots") or () for s in change.get("forced_slots") or ()), ())
+        levels = change.get("start_levels") or ()
+        for i, hero_id in enumerate(change.get("hero_ids") or ()):
+            forced.append(
+                ForcedChampion(
+                    champion_id=int(hero_id),
+                    slot=int(slots[i]) if i < len(slots) else None,
+                    start_level=int(levels[i]) if i < len(levels) else None,
+                )
+            )
+    return tuple(forced)
 
 
 def _adventure(
@@ -246,6 +386,8 @@ def _adventure(
         layout=layout,
         blocked_slots=_blocked_slots(define.get("game_changes")),
         champion_id=champion_of.get(adventure_id) or champion_of.get(base_id),
+        restrictions=_restrictions(define.get("game_changes")),
+        forced=_forced(define.get("game_changes")),
     )
 
 
@@ -296,9 +438,40 @@ def _feats(rows: list[dict]) -> dict[int, Feat]:
             champion_id=int(row["hero_id"]),
             name=row.get("name") or "",
             description=row.get("description") or "",
+            effects=_effect_strings(row.get("effects")),
         )
         for row in rows
         if row.get("hero_id")
+    }
+
+
+def _effect_strings(effects: list | None) -> tuple[str, ...]:
+    return tuple(str(e.get("effect_string") if isinstance(e, dict) else e) for e in effects or () if e)
+
+
+def _upgrades(rows: list[dict]) -> dict[int, Upgrade]:
+    return {
+        int(row["id"]): Upgrade(
+            id=int(row["id"]),
+            champion_id=int(row["hero_id"]),
+            required_level=int(row.get("required_level") or 0),
+            effect=str(row.get("effect") or ""),
+            name=row.get("name") or "",
+            is_specialization=bool(row.get("specialization_name")),
+        )
+        for row in rows
+        if row.get("hero_id")
+    }
+
+
+def _effects(rows: list[dict]) -> dict[int, EffectDefinition]:
+    return {
+        int(row["id"]): EffectDefinition(
+            id=int(row["id"]),
+            effect_keys=tuple(k for k in row.get("effect_keys") or () if isinstance(k, dict)),
+            description=row.get("description") or "",
+        )
+        for row in rows
     }
 
 
@@ -310,6 +483,7 @@ def _gear(loot: list[dict]) -> dict[tuple[int, int, int], GearItem]:
             rarity=int(row["rarity"]),
             name=row.get("name") or "",
             description=row.get("description") or "",
+            effects=_effect_strings(row.get("effects")),
         )
         for row in loot
         if row.get("hero_id") and row.get("slot_id") and row.get("rarity")
@@ -360,12 +534,19 @@ def _specializations(upgrades: list[dict]) -> dict[int, tuple[SpecializationChoi
 
 def _champion(hero: dict) -> Champion:
     tags = frozenset(hero.get("tags") or ())
+    sheet = hero.get("character_sheet_details") or {}
+    age = sheet.get("age")
     return Champion(
         id=int(hero["id"]),
         name=hero["name"],
         seat=int(hero["seat_id"]),
         tags=tags,
         source=_source(hero, tags),
+        base_damage=float(hero.get("base_damage") or 0),
+        ability_scores={str(k).lower(): int(v) for k, v in (sheet.get("ability_scores") or {}).items()},
+        age=int(age) if isinstance(age, (int, float)) or str(age).isdigit() else None,
+        date_available=str(hero.get("date_available") or ""),
+        last_rework_date=str(hero.get("last_rework_date") or ""),
     )
 
 
