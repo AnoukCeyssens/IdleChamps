@@ -86,7 +86,7 @@ def create_app(
         models = ChampionModels(catalogue, account, statuses=ledger.statuses())
         results.update(raw, catalogue, account, models, precompute=refreshed)
         hints.clear()
-        steps.update(raw, account)
+        steps.update(raw, account, catalogue, models)  # with the Area Set Cache and Model Statuses (#36)
         steps.ensure((a, g) for g in NEXT_STEP_GOALS for a in focus.get(catalogue, account, g))
 
     load(raw, refreshed=False)

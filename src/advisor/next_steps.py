@@ -27,14 +27,15 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor, Future
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from advisor.account import RARITY_NAMES, Account, parse_account
 from advisor.catalogue import Adventure, Catalogue, Patron, parse_catalogue
-from advisor.champion_models import ChampionModels
+from advisor.champion_models import ChampionModels, ModelStatus
 from advisor.explorer import is_done, is_running, is_unlocked, patron_completion, tree
 from advisor.hints import CONTRACT_LEVELS, MIN_GAIN_PCT, MODRON_LEVEL_EXP, Change, Hint, candidate_changes, measure
 from advisor.push_verdict import PushVerdict
+from advisor.recompute import _area_sets_key, _statuses_key
 from advisor.recommendation import FormationRecommendation, recommend, with_search_problem
 from advisor.request_log import RawResponses
 from advisor.store import Store
@@ -352,15 +353,25 @@ class Steps:
         self._key: tuple | None = None
         self._run = 0
         self._raw: RawResponses | None = None
+        self._worker_args: tuple = (None, {})  # the Area Set Cache and Model Statuses, for workers
         self._measured: dict[StepKey, tuple[Hint, ...]] = {}
         self._pending: set[StepKey] = set()
         self._pool: Executor | None = None
 
-    def update(self, raw: RawResponses, account: Account) -> None:
-        """New data loaded: drop everything measured on other data (and cancel its jobs)."""
+    def update(
+        self, raw: RawResponses, account: Account, catalogue: Catalogue | None = None,
+        models: ChampionModels | None = None,
+    ) -> None:
+        """New data loaded: drop everything measured on other data (and cancel its jobs). Workers
+        get `catalogue`'s Area Set Cache (Push verdicts and breaking) and `models`' Model Statuses,
+        and both are part of the key, as in the Recompute."""
         key = (account.recommendation_key, str(raw["getdefinitions"].get("checksum")))
+        area_sets = dict(catalogue.area_sets) if catalogue is not None else None
+        statuses = {k: v.value for k, v in models.statuses.items()} if models is not None else {}
+        key += (_area_sets_key(catalogue) if catalogue is not None else "", _statuses_key(models) if models else "")
         with self._lock:
             self._raw = raw
+            self._worker_args = (area_sets, statuses)
             if key == self._key:
                 return
             self._key = key
@@ -400,7 +411,7 @@ class Steps:
             self._pending.update(missing)
             run, raw = self._run, self._raw
             if self._pool is None:
-                self._pool = self._executor_factory(_init_worker, (dict(raw),))
+                self._pool = self._executor_factory(_init_worker, (dict(raw), *self._worker_args))
             pool = self._pool
         for adventure_id, goal in missing:
             pool.submit(_measure_job, adventure_id, goal).add_done_callback(
@@ -438,10 +449,14 @@ class Steps:
 _WORKER: tuple[Catalogue, Account, ChampionModels] | None = None
 
 
-def _init_worker(raw: RawResponses) -> None:
+def _init_worker(raw: RawResponses, area_sets: dict | None = None, statuses: dict | None = None) -> None:
+    """Like the Recompute's workers: the app's Area Set Cache and Model Statuses over the snapshot."""
     global _WORKER
     catalogue, account = parse_catalogue(raw), parse_account(raw)
-    _WORKER = (catalogue, account, ChampionModels(catalogue, account))
+    if area_sets is not None:
+        catalogue = replace(catalogue, area_sets=area_sets)
+    models = ChampionModels(catalogue, account, statuses={k: ModelStatus(v) for k, v in (statuses or {}).items()})
+    _WORKER = (catalogue, account, models)
 
 
 def _measure_job(adventure_id: int, goal: str) -> tuple[Hint, ...]:

@@ -175,8 +175,9 @@ def live_client(live):
 
 
 def test_focus_adventures_are_measured_in_the_background_after_a_refresh(live, live_client):
-    [pool] = live.step_pools  # Gold Farm's Pure Energy; Gem Farm's last-played adventure isn't in the snapshot
-    assert len(pool.pending) == 1
+    # Gold Farm's and Push's Pure Energy; Gem Farm's last-played adventure isn't in the snapshot.
+    [pool] = live.step_pools
+    assert sorted(job[2] for job in pool.pending) == [(9, "Gold Farm"), (9, "Push")]
 
     waiting = _steps(live_client)
     assert rows(waiting, "steps-measuring")[0]["text"].startswith("Measuring in the background: 1 of 1")
@@ -194,7 +195,7 @@ def test_a_pinned_focus_set_is_kept_in_the_store_across_restarts(live, live_clie
     live_client.post("/adventures/7/focus?goal=Gold%20Farm&pin=true")
     live_client.post("/adventures/9/focus?goal=Gem%20Farm&pin=true")
 
-    assert len(live.step_pools[0].pending) == 3  # each newly pinned adventure is measured too
+    assert len(live.step_pools[0].pending) == 4  # each newly pinned adventure is measured too (+ Push's Pure Energy)
     live.server.queue("getuserdetails", _small())
     restarted = live.start(pools=[])  # a new app on the same data folder (its own recompute)
 

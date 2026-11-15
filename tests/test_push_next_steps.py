@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from advisor.request_log import read_responses, write_responses
 from advisor.web import create_app
 from conftest import FIXTURE_LOG, rows
+from test_model_status import reconstructed  # noqa: F401 (fixture)
 
 PUSH = "/next-steps?goal=Push"
 
@@ -157,3 +158,85 @@ def test_the_push_tab_opens_with_ready_to_complete(client):
 
     assert rows(page, "ready-loading")  # loaded by htmx from /next-steps/ready
     assert not rows(client.get("/next-steps?goal=Gem%20Farm").text, "ready-loading")
+
+
+# --- live mode: Push steps measured in the background, over the Area Set Cache -------------------
+
+
+def _small(*without_sets: int) -> dict:
+    """The recording's getuserdetails trimmed to Grand Tour's Mad Wizard and Pure Energy (fast to
+    measure), without the given Area Sets."""
+    from fake_game import user_details
+
+    body = user_details()
+    defines = body["defines"]
+    defines["adventure_defines"] = [a for a in defines["adventure_defines"] if int(a["id"]) in (7, 9)]
+    defines["adventure_area_defines"] = [
+        a for a in defines["adventure_area_defines"] if a["area_set_id"] not in without_sets
+    ]
+    return body
+
+
+def _push_steps(client) -> str:
+    return client.get("/next-steps/steps", params={"goal": "Push"}).text
+
+
+def test_an_area_set_learnt_by_a_refresh_measures_the_push_steps_again(live):
+    live.server.queue("getuserdetails", _small(6), _small())
+    client = live.start()
+    [first] = live.step_pools
+    assert (9, "Push") in [job[2] for job in first.pending]  # Pure Energy, the Push Focus Set
+    first.run()
+    assert not rows(_push_steps(client), "steps-measuring")
+
+    live.clock.advance(3600)
+    client.post("/refresh")  # brings Area Set 6: same recommendation key, a new Area Set Cache
+
+    [_, second] = live.step_pools
+    assert (9, "Push") in [job[2] for job in second.pending]
+    assert rows(_push_steps(client), "steps-measuring")
+
+
+def test_background_workers_measure_over_the_area_set_cache_not_just_the_snapshot(live):
+    from advisor import next_steps
+
+    live.server.queue("getuserdetails", _small())
+    live.start().__exit__(None, None, None)  # the Store's Area Set Cache now holds set 6
+    live.server.queue("getuserdetails", _small(6))  # a snapshot that doesn't bring it
+    client = live.start()
+
+    live.step_pools[-1].run()
+
+    # No Push score in the recording depends on placement (it has no attack_defines), so look at
+    # what the worker measured on: the app's Area Set Cache, as the Recompute's workers do.
+    catalogue, _, _ = next_steps._WORKER
+    assert 6 in catalogue.area_sets
+    assert not rows(_push_steps(client), "steps-measuring")
+
+
+def test_background_workers_measure_with_the_model_statuses_validation_gave(live, reconstructed):
+    from advisor import next_steps
+
+    client = live.start()  # the live damage check on instance 2 sets its champions' statuses
+    shown = {r["text"] for r in rows(client.get("/model-status").text, "model-status")}
+    assert any(not s.endswith("Not Modelled") for s in shown)
+    pool = live.step_pools[-1]
+    pool.pending.sort(key=lambda job: job[2] != (9, "Push"))
+
+    pool.run(1)
+
+    _, _, models = next_steps._WORKER
+    assert models.statuses  # the reconstructed champions' statuses, not all Not Modelled
+    assert models.statuses == live_statuses(client)
+
+
+def live_statuses(client) -> dict:
+    """The app's own Model Statuses (champion id -> status), read back from the champion pages."""
+    from advisor.champion_models import ModelStatus
+    from test_model_status import INSTANCE_2_FORMATION
+
+    statuses = {}
+    for champion_id in INSTANCE_2_FORMATION:
+        (row,) = rows(client.get(f"/champions/{champion_id}").text, "model-status")
+        statuses[champion_id] = next(s for s in ModelStatus if row["text"] == f"Model Status: {s.value}")
+    return statuses
