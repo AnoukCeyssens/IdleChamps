@@ -100,8 +100,8 @@ class DataKey:
 class Workers:
     """The one background pool (live mode; `executor=None` means no background work). It starts on
     the first job and shuts down once idle. Jobs wait here and are fed to the pool at most `slots`
-    at a time (None: all at once), lowest `priority` first, so slow low-priority jobs queued early
-    can't hold every worker. `use` with new data cancels waiting jobs and returns at once; the old
+    at a time (None: all at once), lowest `priority` first; low-priority jobs (priority > 0) hold at
+    most half the slots, so slow ones queued early never keep urgent jobs from starting. `use` with new data cancels waiting jobs and returns at once; the old
     pool drains in the background (`drain`), and jobs on the new data wait until it has, so pools
     never overlap."""
 
@@ -124,6 +124,7 @@ class Workers:
         self._data: WorkerData | None = None
         self._pool: Executor | None = None
         self._running = 0  # jobs handed to the current pool and not yet done
+        self._running_low = 0  # of which low-priority
 
     @property
     def enabled(self) -> bool:
@@ -135,7 +136,7 @@ class Workers:
                 if key == self._key:
                     return
                 self._key, self._data = key, data
-                pool, self._pool, self._running = self._pool, None, 0
+                pool, self._pool, self._running, self._running_low = self._pool, None, 0, 0
                 superseded, self._waiting = self._waiting, []
                 if pool is not None:
                     self._draining = True
@@ -175,13 +176,17 @@ class Workers:
                 and self._data is not None
                 and (self._slots is None or self._running < self._slots)
             ):
+                low = self._waiting[0][0] > 0
+                if low and self._slots is not None and self._running_low >= max(1, self._slots // 2):
+                    break  # the rest are low-priority too (a heap): keep slots free for urgent jobs
                 _, _, on_done, fn, args = heapq.heappop(self._waiting)
                 if self._pool is None:
                     self._pool = self._factory(_init_worker, (self._data,))
                 self._running += 1
-                started.append((self._pool, self._pool.submit(fn, *args), on_done))
-        for pool, future, on_done in started:
-            future.add_done_callback(lambda f, pool=pool, on_done=on_done: self._done(pool, f, on_done))
+                self._running_low += low
+                started.append((self._pool, self._pool.submit(fn, *args), on_done, low))
+        for pool, future, on_done, low in started:
+            future.add_done_callback(lambda f, pool=pool, on_done=on_done, low=low: self._done(pool, f, on_done, low))
 
     def close(self) -> None:
         with self._lock:
@@ -190,7 +195,7 @@ class Workers:
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
 
-    def _done(self, pool: Executor, future: Future, on_done: Callable[[Future], None]) -> None:
+    def _done(self, pool: Executor, future: Future, on_done: Callable[[Future], None], low: bool) -> None:
         try:
             on_done(future)
         finally:
@@ -198,6 +203,7 @@ class Workers:
             with self._lock:
                 if pool is self._pool:
                     self._running -= 1
+                    self._running_low -= low
                     if self._running <= 0 and not self._waiting:
                         self._pool, idle = None, True
             if idle:

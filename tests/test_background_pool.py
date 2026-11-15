@@ -106,9 +106,25 @@ def test_with_limited_workers_urgent_jobs_run_before_earlier_queued_background_o
         workers.submit(lambda f: None, str, f"adventure {n}")  # priority 0: first
 
     [pool] = opened
-    assert [n for n, _ in pool.submitted] == ["steps 0", "steps 1"]  # only 2 at a time
+    assert [n for n, _ in pool.submitted] == ["steps 0", "adventure 0"]  # 2 at a time; steps hold ≤ half
     _finish(pool, "steps 0")
-    assert [n for n, _ in pool.submitted][2:] == ["adventure 0"]
-    _finish(pool, "steps 1")
+    assert [n for n, _ in pool.submitted][2:] == ["adventure 1"]  # adventures before the waiting steps
     _finish(pool, "adventure 0")
-    assert [n for n, _ in pool.submitted][3:] == ["adventure 1", "adventure 2"]
+    _finish(pool, "adventure 1")
+    assert [n for n, _ in pool.submitted][3:] == ["adventure 2", "steps 1"]
+
+
+def test_low_priority_jobs_never_hold_every_worker():
+    """At app start Next Steps' measuring jobs arrive before the Recompute's adventures; they may
+    take at most half the workers, so adventures start as soon as they are queued."""
+    opened: list[CountingPool] = []
+    workers = Workers(lambda init, args: CountingPool(opened), slots=4)
+    workers.use(_key(1), data=object())
+    for n in range(4):
+        workers.submit(lambda f: None, str, f"steps {n}", priority=1)
+
+    [pool] = opened
+    assert [n for n, _ in pool.submitted] == ["steps 0", "steps 1"]
+    for n in range(3):
+        workers.submit(lambda f: None, str, f"adventure {n}")
+    assert [n for n, _ in pool.submitted][2:] == ["adventure 0", "adventure 1"]
