@@ -2,7 +2,7 @@
 <ul class="champions">
   {% for row in rows %}{% set c = row.champion %}
   <li data-row="champion" class="champion {{ 'owned' if row.owned else 'unowned' }}">
-    <span class="name">{{ c.name }}</span>
+    <a class="name" href="/champions/{{ c.id }}">{{ c.name }}</a>
     <span class="state">· {% if row.owned %}Level {{ row.owned.level }}{% else %}{{ c.source.label }}{% endif %}</span>
     <span class="tags">· Seat {{ c.seat }}{% if c.role_tags %} · {{ c.role_tags | join(", ") }}{% endif %}</span>
   </li>

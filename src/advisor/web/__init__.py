@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from advisor.account import parse_account
-from advisor.catalogue import ROLE_TAGS, parse_catalogue
+from advisor.catalogue import GEAR_SLOTS, ROLE_TAGS, parse_catalogue
 from advisor.game_client import OfflineGameClient
 
 _TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
@@ -35,6 +35,38 @@ def create_app(log_path: Path) -> FastAPI:
         template = "_champion_rows.html" if request.headers.get("HX-Request") else "champions.html"
         return _TEMPLATES.TemplateResponse(
             request, template, {"rows": rows, "role": role, "role_tags": ROLE_TAGS}
+        )
+
+    @app.get("/champions/{champion_id}", response_class=HTMLResponse)
+    def champion_detail(request: Request, champion_id: int) -> HTMLResponse:
+        champion = catalogue.find(champion_id)
+        if champion is None:
+            raise HTTPException(status_code=404, detail="No such champion")
+        owned = account.champions.get(champion_id)
+        gear = []
+        for slot in GEAR_SLOTS:
+            held = owned.gear.get(slot) if owned else None
+            item = catalogue.gear_item(champion_id, slot, held.rarity) if held else None
+            gear.append({"slot": slot, "owned": held, "item": item})
+        owned_feats = owned.feats if owned else ()
+        feats = [
+            {"id": f, "feat": catalogue.feats.get(f), "owned": True, "equipped": f in owned.equipped_feats}
+            for f in owned_feats
+        ] + [
+            {"id": f.id, "feat": f, "owned": False, "equipped": False}
+            for f in catalogue.feats_of(champion_id)
+            if f.id not in owned_feats
+        ]
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "champion_detail.html",
+            {
+                "champion": champion,
+                "owned": owned,
+                "gear": gear,
+                "feats": feats,
+                "spec_choices": catalogue.specializations.get(champion_id, ()),
+            },
         )
 
     return app
