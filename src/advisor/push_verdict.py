@@ -30,7 +30,7 @@ from advisor.account import Account, GameInstance
 from advisor.area_sets import BREAKING_CHANGES, BREAKING_PROPERTIES, AreaSet, boss_health
 from advisor.explorer import same_area_set_to_load
 from advisor.catalogue import Adventure, Catalogue, Champion, HealthCurve
-from advisor.champion_models import BREAK_TIME_S, BreakingNeed, ChampionModels, Loadout, ModelStatus, Seat
+from advisor.champion_models import BREAK_TIME_S, BreakingNeed, ChampionModels, Loadout, Seat
 
 KILL_TIME_S = 30.0  # a boss must die within this many seconds of Main DPS hits
 DEFAULT_COOLDOWN_S = 5.0  # when the Main DPS's attack definition isn't loaded

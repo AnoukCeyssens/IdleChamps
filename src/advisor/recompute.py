@@ -1,7 +1,7 @@
 """Recompute: Formation Recommendations precomputed in a background process pool (spec #22, #13).
 
-After each Refresh every adventure × Run Goal (events that aren't running included) is computed,
-so opening an adventure is instant. Results are keyed on the account's recommendation key, the
+After each Refresh every adventure × Run Goal (patron variants and events that aren't running
+included) is computed, so opening an adventure is instant. Results are keyed on the account's recommendation key, the
 definitions checksum and the advisor's own code, and persisted in the Store, so a restart (or a
 currency-only Refresh) reuses them.
 
@@ -9,7 +9,7 @@ While a recompute runs, the results from before it stay visible, marked stale. A
 changes the key cancels the pending jobs and restarts from the new snapshot; the old pool is shut
 down (its running jobs finished) before the new one starts, so two recomputes never run side by
 side; Next Steps' background measuring shares the same pool (`background.Workers`). Anything not
-precomputed (a patron variant, a job that failed) is computed on demand.
+precomputed (a job that failed) is computed on demand.
 """
 
 from __future__ import annotations
@@ -195,7 +195,11 @@ class Recompute:
 
 
 def compute_job(adventure_id: int, goals: tuple[str, ...]) -> list[tuple[ResultKey, FormationRecommendation]]:
-    """Worker side: every goal's recommendation for one adventure."""
+    """Worker side: every goal's recommendation for one adventure and each of its patron variants."""
     catalogue, account, models = worker_data()
     adventure = catalogue.adventure(adventure_id)
-    return [((adventure_id, goal, None), recommend(catalogue, account, adventure, goal, models=models)) for goal in goals]
+    return [
+        ((adventure_id, goal, patron), recommend(catalogue, account, adventure, goal, patron, models=models))
+        for patron in (None, *adventure.patron_objectives)
+        for goal in goals
+    ]

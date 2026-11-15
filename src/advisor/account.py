@@ -150,10 +150,15 @@ class Account:
 
     @property
     def recommendation_key(self) -> str:
-        """Hash of `owned_state()`: changes only when something a recommendation depends on
+        """Hash of the result-relevant part of `owned_state()`: changes only when something a recommendation depends on
         changes, so a currency-only Refresh keeps it (results are keyed on it, with the
         definitions checksum)."""
-        canonical = json.dumps(self.owned_state(), sort_keys=True, separators=(",", ":"))
+        state = self.owned_state()
+        # Only what changes a result: which patrons are unlocked and event tiers are shown live (patron
+        # variants are computed either way), and a saved formation's name isn't scored.
+        del state["unlocked_patron_ids"], state["event_tiers"]
+        state["saved_formations"] = [{k: v for k, v in f.items() if k != "name"} for f in state["saved_formations"]]
+        canonical = json.dumps(state, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

@@ -155,6 +155,40 @@ def test_a_definitions_change_recomputes_after_a_restart(live, client):
     assert len(live.pools[-1].jobs(RECOMPUTE)) == 4
 
 
+def test_patron_variants_are_precomputed_too(live, client):
+    """Spec #22: every adventure × Run Goal is computed on Refresh, patron variants included. Read
+    back from the app data folder's results file."""
+    from advisor.store import Store
+
+    live.pools[0].run(kind=RECOMPUTE)
+
+    _, entries = Store(live.data_dir).load_results()
+    patron_variants = {(a, g, p) for a, g, p, _ in entries if p is not None}
+    assert {(9, goal, 1) for goal in ("Push", "Gem Farm", "Gold Farm")} <= patron_variants  # Pure Energy (Mirt)
+    page = client.get("/adventures/9?goal=Push&patron=1").text
+    assert rows(page, "main-dps") and not rows(page, "stale-result")
+
+
+def _rename_saved_formations(details):
+    for save in details["formation_saves_v2"]:
+        save["name"] = "Renamed"
+
+
+@pytest.mark.parametrize("change", ["rename", "patron"])
+def test_changes_no_result_depends_on_do_not_recompute(live, client, change):
+    """Spec #22: the key hashes only what affects results: a saved formation's slots, not its name;
+    not which patrons are unlocked (patron variants are computed either way)."""
+    live.pools[0].run(kind=RECOMPUTE)
+
+    def unlock_mirt(details):
+        next(p for p in details["patrons"] if str(p["patron_id"]) == "1")["unlocked"] = True
+
+    page = _refresh_with(live, client, _rename_saved_formations if change == "rename" else unlock_mirt).text
+
+    assert _progress(page) is None
+    assert not any(pool.jobs(RECOMPUTE) for pool in live.pools)
+
+
 def _no_runs_started(details):
     for instance in details["game_instances"]:
         instance.get("stats", {}).pop("this_reset_highest_damage_dealt", None)

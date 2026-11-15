@@ -226,3 +226,47 @@ def test_history_line_and_data_folder_button(live, monkeypatch):
     assert _one(page, "data-folder") == "Open the app data folder"
     client.post("/data-folder")
     assert opened == [live.data_dir]
+
+
+@pytest.fixture
+def instance_1_reconstructed(monkeypatch):
+    """Instance 1's champions (The Crypt of Legends (Morte), Kas's run) all reconstructed, so its live
+    damage check can pass: Kas keeps his real reconstruction."""
+    for champion_id in (56, 158, 126, 163, 128, 59, 149, 25, 43):
+        monkeypatch.setitem(
+            champion_models.RECONSTRUCTIONS, champion_id, Reconstruction((f"test_description_{champion_id}",))
+        )
+
+
+def test_background_workers_score_with_the_model_statuses_validation_gave(live, instance_1_reconstructed):
+    """Recommendations computed in the background badge exactly the champions the app holds unverified
+    (Check Failed or Stale): workers get the Model Statuses, not just the snapshot."""
+    from fake_game import RECOMPUTE
+
+    client = live.start()
+    predicted = _predicted(client.get("/model-status").text, 1)
+    body = user_details()
+    for instance in body["details"]["game_instances"]:
+        if int(instance["game_instance_id"]) == 1:
+            instance["stats"]["this_reset_highest_damage_dealt"] = repr(predicted * 1.015)
+    _refresh(live, client, "getuserdetails", body)  # instance 1's champions, Kas included: Verified
+    pool = live.pools[-1]
+    pool.pending.sort(key=lambda job: not (job[1].__name__ == RECOMPUTE and job[2][0] == 9))
+    pool.run(1)  # Pure Energy, computed by a worker
+
+    page = client.get("/adventures/9?goal=Gold%20Farm").text
+    statuses = {}
+    for r in rows(client.get("/model-status").text, "model-status"):
+        status = next(v for v in ("Not Modelled", "Verified", "Check Failed", "Stale") if r["text"].endswith(" " + v))
+        statuses[r["text"].removesuffix(" " + status)] = status
+    seated = [
+        max((name for name in statuses if r["text"].startswith(f"Slot {r['text'].split()[1]} {name} ")), key=len)
+        for r in rows(page, "seat-row") if "empty" not in r["classes"] and "blocked" not in r["classes"]
+    ]
+    assert any(statuses[name] == "Verified" for name in seated), seated
+    unverified = sum(1 for name in seated if statuses[name] in ("Check Failed", "Stale"))
+    badge = rows(page, "unverified-badge")
+    if unverified:
+        assert badge[0]["text"] == f"{unverified} champion{'s' if unverified > 1 else ''} unverified, score may be off"
+    else:
+        assert not badge

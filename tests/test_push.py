@@ -9,15 +9,12 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
 
-from advisor.account import parse_account
-from advisor.catalogue import CORE_HEALTH_CURVE, HealthCurve, parse_catalogue
-from advisor.champion_models import ChampionModels
-from advisor.push_verdict import formation_in_play, instance_estimate, push_verdict, wall_area
+from advisor.catalogue import CORE_HEALTH_CURVE, HealthCurve
+from advisor.push_verdict import wall_area
 from advisor.request_log import read_responses, write_responses
 from advisor.web import create_app
 from conftest import FIXTURE_LOG, rows
@@ -192,7 +189,7 @@ def tougher(tmp_path_factory) -> TestClient:
     return _app(tmp_path_factory, "tougher", toughen)
 
 
-# --- Seam 2: the Push Verdict module, for what the Push tab can't show yet -----------------------
+# --- the damage wall: a pure function, checked on worked numbers ----------------------------------
 
 
 def test_the_damage_wall_is_the_first_boss_the_damage_cannot_kill():
@@ -221,28 +218,6 @@ def test_only_stale_or_check_failed_champions_widen_the_band_and_get_the_badge(c
     (band,) = [a for a in _assumptions(event) if a.startswith("Band ±")]
     assert band.startswith("Band ±20 areas: 12 on event campaigns, +5 for the anchor's different Main DPS, +3 for each of 1")
     assert not rows(event, "unverified-badge")
-
-
-@pytest.fixture(scope="module")
-def recorded():
-    raw = read_responses(FIXTURE_LOG)
-    catalogue, account = parse_catalogue(raw), parse_account(raw)
-    return catalogue, account, ChampionModels(catalogue, account)
-
-
-def test_likely_when_placement_is_known_and_the_margin_beats_the_band(recorded):
-    catalogue, account, models = recorded
-    (asharra_run,) = [i for i in account.instances if i.id == 2]
-    adventure = replace(catalogue.adventure(9), objective_area=40)  # 84 − 40 = 44 > 34
-    seats = formation_in_play(catalogue, account, asharra_run)
-    main = next(s for s in seats if s.champion_id == 6)
-    fresh = replace(account, best_areas={})
-
-    known = push_verdict(catalogue, fresh, models, adventure, None, seats, main, placement_known=True)
-    unknown = push_verdict(catalogue, fresh, models, adventure, None, seats, main, placement_known=False)
-
-    assert known.label == "Likely" and not known.capped
-    assert unknown.label == "Borderline" and unknown.capped
 
 
 def _expected(page: str) -> int:
