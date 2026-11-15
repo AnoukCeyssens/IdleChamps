@@ -146,7 +146,7 @@ def test_no_legal_formation_shows_the_missing_piece(tmp_path_factory):
 
 
 def test_other_run_goals_do_not_show_a_recommendation_yet(client):
-    assert rows(client.get("/adventures/7?goal=Push").text, "main-dps") == []
+    assert rows(client.get("/adventures/7?goal=Gem%20Farm").text, "main-dps") == []
 
 
 # --- "What would make this better" hints (#34) -----------------------------------------------
@@ -183,3 +183,13 @@ def test_potions_stay_out_of_the_baseline_score(hinted, modelled):
     page = hinted.get(GOLD.format(2024)).text
     assert _one(page, "score") == _one(modelled.get(GOLD.format(2024)).text, "score")
     assert "No potions." in [r["text"] for r in rows(page, "assumption")]
+
+
+def test_push_recommendations_load_hints_too(hinted):
+    page = hinted.get("/adventures/7?goal=Push").text
+    (loader,) = re.findall(r'data-row="hints-loading" hx-get="([^"]+)" hx-trigger="load"', page)
+
+    hints = [r["text"] for r in rows(hinted.get(loader.replace("&amp;", "&")).text, "hint")]
+
+    assert hints[0] == "Get Evelyn (The Great Modron March, Year 1) → +300% Main DPS damage"
+    assert all(re.search(r" → \+[\d.]+% Main DPS damage$", h) for h in hints)

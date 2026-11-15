@@ -156,6 +156,12 @@ class ChampionModels:
                 "Armoured and hits-based monsters (breaking) are ignored for Gold Farm.",
                 *common,
             )
+        if run_goal == "Push":
+            return (
+                "Push is scored on Main DPS damage, with stacking effects at max_stacks (Not Modelled champions' "
+                "stacks are not counted yet).",
+                *common,
+            )
         return common
 
     # --- generic effect layer ----------------------------------------------------------------
