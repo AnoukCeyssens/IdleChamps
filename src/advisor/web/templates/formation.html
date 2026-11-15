@@ -53,6 +53,10 @@
   .rail .score .unit { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
   .rail .gap { margin: 2px 0 8px; color: var(--muted); }
   .badge.warn { border-color: #e67700; color: #b35c00; display: inline-block; margin: 0; }
+  .rail .exact { margin: 2px 0 8px; color: #2f9e44; }
+  .rail .prove { margin: 4px 0 10px; }
+  .rail .prove .htmx-indicator { display: none; color: var(--muted); margin-left: 6px; }
+  .rail .prove.htmx-request .htmx-indicator { display: inline; }
   @media (max-width: 760px) { .recommendation { grid-template-columns: 1fr; } }
   @media (max-width: 760px) { .explorer { grid-template-columns: 1fr; } .tree { position: static; max-height: 40vh; border-right: 0; } }
 </style>
@@ -69,7 +73,7 @@
     {% endfor %}
   </nav>
 
-  <section>
+  <section id="formation">
     <div class="head" data-row="adventure-header">
       <div class="context">
         <span data-row="header-campaign">{{ campaign.name }}</span>
@@ -166,6 +170,22 @@
         {% if rec.score is not none %}
         <p data-row="score" class="score">Score {{ rec.score | sci }} <span class="unit">{{ rec.score_label }}</span></p>
         <p data-row="gap" class="gap">at most {{ "%.0f" % rec.gap_pct if rec.gap_pct >= 1 or rec.gap_pct == 0 else "%.1f" % rec.gap_pct }}% from best</p>
+        {% endif %}
+        {% if rec.exact_solve == "improved" %}
+        <p data-row="exact-outcome" class="exact">Exact: the exact solve found a better formation</p>
+        {% elif rec.exact_solve == "proven" %}
+        <p data-row="exact-outcome" class="exact">Proven best: exact solve found nothing better</p>
+        {% elif rec.exact_solve == "timed_out" %}
+        <p data-row="exact-outcome" class="exact">Exact solve stopped at its time limit: nothing better found</p>
+        {% endif %}
+        {% if rec.main_dps and (rec.gap_pct != 0 or not rec.exact_solve) %}
+        {% set prove_url %}/adventures/{{ adv.id }}/prove?goal={{ goal | urlencode }}{% if patron %}&patron={{ patron }}{% endif %}{% endset %}
+        <form data-row="prove" class="prove" method="post" action="{{ prove_url }}"
+              hx-post="{{ prove_url }}" hx-target="#formation" hx-select="#formation" hx-swap="outerHTML"
+              hx-indicator="this" hx-disabled-elt="find button">
+          <button type="submit">Prove it's the best</button>
+          <span class="htmx-indicator">Solving, up to 60 s…</span>
+        </form>
         {% endif %}
         {% if rec.unverified_champions %}
         <p data-row="unverified-badge" class="badge warn">{{ rec.unverified_champions | length }} champion{{ 's' if rec.unverified_champions | length != 1 }} unverified, score may be off</p>

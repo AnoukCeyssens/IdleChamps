@@ -6,6 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115",
     "jinja2>=3.1",
+    "ortools>=9.12",
     "uvicorn>=0.32",
 ]
 
@@ -29,4 +30,4 @@ module-name = "advisor"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-filterwarnings = ["ignore:Using `httpx` with `starlette.testclient` is deprecated"]
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient` is deprecated", "ignore:Bitwise inversion:DeprecationWarning"]
