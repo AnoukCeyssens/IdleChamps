@@ -32,8 +32,20 @@ ExecutorFactory = Callable[[Callable, tuple], Executor]  # (worker initializer, 
 WORKER_COUNT = max(1, (os.cpu_count() or 2) - 1)
 
 
+class _StoppablePool(ProcessPoolExecutor):
+    """A process pool whose running jobs can be stopped (Python 3.13 has no public way)."""
+
+    def stop(self) -> None:
+        processes = list((self._processes or {}).values())
+        self.shutdown(wait=False, cancel_futures=True)
+        for process in processes:
+            process.terminate()
+        for process in processes:
+            process.join(5)
+
+
 def process_pool(initializer: Callable, initargs: tuple) -> Executor:
-    return ProcessPoolExecutor(max_workers=WORKER_COUNT, initializer=initializer, initargs=initargs)
+    return _StoppablePool(max_workers=WORKER_COUNT, initializer=initializer, initargs=initargs)
 
 
 def _code_fingerprint() -> str:
@@ -148,10 +160,14 @@ class Workers:
                 self._drain_in(lambda: self._drain(pool))
 
     def _drain(self, pool: Executor) -> None:
-        """Wait out the old data's running jobs (pending ones are cancelled), then start the jobs
-        waiting on the current data."""
+        """End the old data's jobs (their results would be thrown away): stop the running ones when
+        the pool can, else wait them out; then start the jobs waiting on the current data."""
         try:
-            pool.shutdown(wait=True, cancel_futures=True)
+            stop = getattr(pool, "stop", None)
+            if stop is not None:
+                stop()
+            else:
+                pool.shutdown(wait=True, cancel_futures=True)
         finally:
             with self._lock:
                 self._draining = False

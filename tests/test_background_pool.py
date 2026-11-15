@@ -128,3 +128,40 @@ def test_low_priority_jobs_never_hold_every_worker():
     for n in range(3):
         workers.submit(lambda f: None, str, f"adventure {n}")
     assert [n for n, _ in pool.submitted][2:] == ["adventure 0", "adventure 1"]
+
+
+def test_a_data_change_stops_the_old_pools_running_jobs_instead_of_waiting_them_out():
+    """Running jobs on out-of-date data are thrown away anyway; a pool that can stop them (the real
+    process pool) is stopped, so the new data's jobs start at once."""
+    release, opened = threading.Event(), []
+
+    class StoppablePool(SlowPool):
+        stopped = False
+
+        def stop(self):
+            self.stopped = True
+            self.closed = True
+
+    workers = Workers(lambda init, args: StoppablePool(release, opened), drain=lambda job: job())
+    workers.use(_key(1), data=object())
+    workers.submit(lambda f: None, len, "old job")  # never released: would block a waiting drain
+    workers.use(_key(2), data=object())
+    workers.submit(lambda f: None, len, "new job")
+
+    assert opened[0].stopped
+    assert [args for _, args, _ in opened[1].submitted] == [("new job",)]
+
+
+def test_the_real_pool_stops_a_running_job():
+    import time
+
+    from advisor.background import process_pool
+
+    pool = process_pool(int, ())  # a picklable no-op initializer
+    pool.submit(time.sleep, 30)
+    time.sleep(0.5)  # let it start
+    processes = list(pool._processes.values())
+    started = time.monotonic()
+    pool.stop()
+    assert time.monotonic() - started < 5
+    assert processes and not any(p.is_alive() for p in processes)
