@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{# Variant C — Compare: pick one adventure from a search box; all four Run Goals side by side;
+   champions shared by every goal are outlined, so the differences between goals stand out. #}
+{% block body %}
+{% set rs = [] %}{% for g in goals %}{% set _ = rs.append(recommend(adv.id, g, patron)) %}{% endfor %}
+{% set ns = namespace(common=None) %}
+{% for r in rs %}{% set ids = r.picked|map(attribute='id')|list %}
+  {% set ns.common = ids if ns.common is none else ns.common|select('in', ids)|list %}{% endfor %}
+<style>
+  .c-top { position:sticky; top:0; z-index:5; background:var(--bg); border-bottom:1px solid var(--line); padding:12px 20px; display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  .c-top input { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px 10px; width:340px; font-size:15px; }
+  .c-grid { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:12px; padding:16px 20px; }
+  .c-col { display:flex; flex-direction:column; gap:8px; }
+  .c-col h2 { display:flex; justify-content:space-between; align-items:baseline; }
+  .c-hints { padding:0 20px 90px; display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .seg a { padding:4px 10px; border:1px solid var(--line); margin-right:-1px; font-size:12px; }
+  .seg a.on { background:var(--panel2); color:var(--accent); }
+</style>
+<div class="c-top">
+  <form method="get" onsubmit="const o=[...document.querySelectorAll('#advlist option')].find(o=>o.value===this.name_q.value); if(o){this.adv.value=o.dataset.id} ">
+    <input type="hidden" name="variant" value="C"><input type="hidden" name="adv" value="{{ adv.id }}">
+    <input name="name_q" list="advlist" placeholder="Jump to adventure…" value="{{ adv.name }}" onfocus="this.select()" onchange="this.form.requestSubmit()">
+    <datalist id="advlist">{% for a in advs.values() %}<option value="{{ a.name }}" data-id="{{ a.id }}">{{ a.campaign }}{% if a.completed %} ✓{% endif %}</option>{% endfor %}</datalist>
+  </form>
+  <div>
+    <div class="small muted">{{ adv.campaign }}{% if adv.parent %} · variant of <a href="{{ m.url('C', adv.parent, goal) }}">{{ advs[adv.parent].name }}</a>{% endif %} · objective {{ adv.objective }} · {{ m.status(adv) }}</div>
+    <div class="small">{{ adv.restrictions }}</div>
+  </div>
+  {% if adv.patrons %}
+  <div class="seg"><a class="{% if not patron %}on{% endif %}" href="{{ m.url('C', adv.id, goal) }}">No patron</a>{% for pid, ar in adv.patrons.items() %}<a class="{% if patron == pid %}on{% endif %}" href="{{ m.url('C', adv.id, goal, pid) }}">{{ patron_names[pid] }} {{ ar }}{% if not patrons_unlocked.get(pid) %}🔒{% endif %}</a>{% endfor %}</div>
+  {% endif %}
+  {% if adv.variants %}<div class="small">Variants: {% for v in adv.variants %}<a href="{{ m.url('C', v.id, goal) }}">{{ v.name }}</a>{% if v.completed %} ✓{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</div>{% endif %}
+</div>
+
+<div class="small muted" style="padding:10px 20px 0">Outlined = in every Run Goal's formation ({{ ns.common|length }} champions). {{ m.legend() }}</div>
+<div class="c-grid">
+  {% for r in rs %}
+  <div class="c-col panel">
+    <h2>{{ r.goal }} <span class="small muted">{{ r.score }} · ±{{ r.gap }}</span></h2>
+    {{ m.grid(r, scale=3.0, node_w=66, node_h=34, highlight=ns.common) }}
+    <ul class="clean small">
+      {% for c in r.cells|sort(attribute='col') if c.hero and c.hero.id not in ns.common %}
+        <li><b>{{ c.hero.name }}</b> <span class="muted">{{ c.role }}{% if c.hero.specs %} · {{ c.hero.specs|join(', ') }}{% endif %}</span></li>
+      {% endfor %}
+    </ul>
+    {% if r.familiars %}<div class="small">🐾 familiars on {{ r.familiars.seats|join(', ') }}</div>{% endif %}
+    {% if r.modron %}<div class="small">⚙ modron core {{ r.modron.core }} resets at {{ r.modron.reset_area }}</div>{% endif %}
+    <div class="small muted" style="margin-top:auto">Assumes: {{ r.assumptions|join('; ') }}</div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="c-hints">
+  <div class="panel">
+    <h3>What would make this adventure better (all goals, ranked)</h3>
+    <table>
+      <tr><th>Change</th>{% for g in goals %}<th>{{ g }}</th>{% endfor %}</tr>
+      {% set seen = [] %}
+      {% for r in rs %}{% for h in r.hints if h.text not in seen %}{% set _ = seen.append(h.text) %}
+        <tr><td>{{ h.text }}</td>{% for r2 in rs %}{% set hit = r2.hints|selectattr('text','equalto',h.text)|list %}<td class="gain">{{ hit[0].gain if hit else '' }}</td>{% endfor %}</tr>
+      {% endfor %}{% endfor %}
+    </table>
+  </div>
+  <div class="panel">
+    <h3>Shared core</h3>
+    <ul class="clean small">{% for c in rs[0].cells if c.hero and c.hero.id in ns.common %}<li>{{ c.hero.name }} <span class="muted">lvl {{ c.hero.level }} · feats {{ c.hero.feats|join(', ') or '—' }}</span></li>{% endfor %}</ul>
+  </div>
+</div>
+{% endblock %}

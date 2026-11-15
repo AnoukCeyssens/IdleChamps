@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE · Formation view · {{ variant }}</title>
+<script src="https://unpkg.com/htmx.org@1.9.12"></script>
+<style>
+  :root { --bg:#14161a; --panel:#1d2026; --panel2:#252931; --line:#343945; --text:#e6e8ec; --dim:#9aa1ad;
+          --accent:#e0a84a; --ok:#5fbf7f; --bad:#e06a5a; --link:#7fb2ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 -apple-system, system-ui, sans-serif; }
+  a { color:var(--link); text-decoration:none; } a:hover { text-decoration:underline; }
+  h1,h2,h3 { margin:0 0 .4em; font-weight:600; } h1 { font-size:20px; } h2 { font-size:16px; } h3 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); }
+  .proto-banner { background:#5a2d6e; color:#fff; font-size:12px; padding:4px 12px; text-align:center; }
+  .muted { color:var(--dim); } .small { font-size:12px; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:99px; background:var(--panel2); border:1px solid var(--line); font-size:12px; }
+  .pill.ok { border-color:var(--ok); color:var(--ok); } .pill.warn { border-color:var(--accent); color:var(--accent); }
+  .pill.lock { opacity:.55; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .tabs { display:flex; gap:4px; border-bottom:1px solid var(--line); margin-bottom:12px; }
+  .tabs a { padding:8px 14px; color:var(--dim); border-bottom:2px solid transparent; }
+  .tabs a.on { color:var(--text); border-color:var(--accent); }
+  table { border-collapse:collapse; width:100%; } th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--dim); font-weight:500; font-size:12px; }
+  ul.clean { list-style:none; margin:0; padding:0; } ul.clean li { padding:3px 0; }
+  .gain { color:var(--ok); font-variant-numeric:tabular-nums; }
+  .stub { border-bottom:1px dashed var(--dim); cursor:help; }
+  /* role colours, shared by all variants */
+  .r-main-DPS { fill:#e06a5a; } .r-dps { fill:#e08a4a; } .r-support { fill:#5b8fe0; } .r-speed { fill:#5fbf7f; }
+  .r-gold { fill:#e0c04a; } .r-healing { fill:#4ac0c0; } .r-tanking { fill:#8a8f99; } .r-debuff { fill:#a77be0; }
+  .r-control { fill:#7a7fe0; } .r-filler { fill:#555b66; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:5px; vertical-align:middle; }
+  /* prototype switcher — not part of the design */
+  #proto-switch { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); z-index:999;
+    background:#fff; color:#111; border-radius:99px; box-shadow:0 6px 24px rgba(0,0,0,.5);
+    display:flex; align-items:center; gap:4px; padding:4px; font:600 13px system-ui; }
+  #proto-switch button { border:0; background:#eee; border-radius:99px; width:30px; height:30px; cursor:pointer; font-size:15px; }
+  #proto-switch span { padding:0 12px; min-width:150px; text-align:center; }
+</style>
+</head>
+<body>
+<div class="proto-banner">PROTOTYPE · real champions &amp; adventures from your log · recommendations, scores, gaps and hints are STUBS</div>
+{% block body %}{% endblock %}
+<div id="proto-switch">
+  <button onclick="cycle(-1)" title="previous variant (←)">‹</button>
+  <span>{{ variant }} ({{ variants[variant] }})</span>
+  <button onclick="cycle(1)" title="next variant (→)">›</button>
+</div>
+<script>
+  const KEYS = {{ variants.keys()|list|tojson }};
+  function cycle(d) {
+    const u = new URL(location.href);
+    const i = KEYS.indexOf(u.searchParams.get('variant') || 'A');
+    u.searchParams.set('variant', KEYS[(i + d + KEYS.length) % KEYS.length]);
+    location.replace(u);
+  }
+  addEventListener('keydown', e => {
+    const t = e.target;
+    if (t.matches && t.matches('input, textarea, select, [contenteditable]')) return;
+    if (e.key === 'ArrowLeft') cycle(-1);
+    if (e.key === 'ArrowRight') cycle(1);
+  });
+</script>
+</body>
+</html>

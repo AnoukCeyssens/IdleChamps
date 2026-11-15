@@ -1,0 +1,27 @@
+{% import "_macros.html" as m %}
+{# Variant B inline detail: list-first (front-to-back seat list), grid secondary. #}
+<div style="display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:18px;padding:14px 18px;background:#181b20">
+  <div>
+    <h2>{{ r.adv.name }} · {{ r.goal }}{% if r.patron %} · {{ patron_names[r.patron] }}{% endif %}</h2>
+    <div class="small muted">score (stub) <b style="color:var(--text)">{{ r.score }}</b> · gap ≤ {{ r.gap }}
+      {% for pid in r.adv.patrons %} · <a href="#" hx-get="/prototype/formation-view/cell?adv={{ r.adv.id }}&goal={{ r.goal|urlencode }}&patron={{ pid }}" hx-target="#detail-{{ r.adv.id }}">{{ patron_names[pid] }}</a>{% endfor %}
+      · <a href="#" onclick="this.closest('td').innerHTML='';return false">close</a></div>
+    <table style="margin-top:8px">
+      <tr><th>Col</th><th>Champion</th><th>Role</th><th>Spec</th><th>Feats</th></tr>
+      {% for c in r.cells|sort(attribute='col') if c.hero %}
+        <tr><td>{{ c.col }}</td><td>{{ c.hero.name }} <span class="small muted">{{ c.hero.level }}</span></td><td>{{ c.role }}</td>
+          <td class="small">{{ c.hero.specs|join(', ') or '—' }}</td><td class="small">{{ c.hero.feats|join(', ') or '—' }}</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+  <div>{{ m.grid(r, scale=3.5, node_w=70, node_h=34) }}
+    {% if r.familiars %}<div class="small">Familiars: seats {{ r.familiars.seats|join(', ') }}</div>{% endif %}
+    {% if r.modron %}<div class="small">Modron core {{ r.modron.core }}: reset at {{ r.modron.reset_area }}</div>{% endif %}
+  </div>
+  <div>
+    <h3>Make it better</h3>
+    <ul class="clean small">{% for h in r.hints %}<li>{{ h.text }} <span class="gain">{{ h.gain }}</span></li>{% endfor %}</ul>
+    <h3 style="margin-top:10px">Assumes</h3>
+    <ul class="clean small muted">{% for s in r.assumptions %}<li>• {{ s }}</li>{% endfor %}</ul>
+  </div>
+</div>

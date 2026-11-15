@@ -1,0 +1,74 @@
+{# Shared drawing helpers only. Each variant owns its own layout. #}
+
+{% macro grid(r, scale=5.5, node_w=92, node_h=48, highlight=None, show_adj=True, familiars=True) -%}
+{%- set cells = r.cells -%}
+{%- set maxx = cells|map(attribute='x')|max if cells else 0 -%}
+{%- set maxy = cells|map(attribute='y')|max if cells else 0 -%}
+{%- set pad = node_w // 2 + 6 -%}
+{%- set W = maxx * scale + pad * 2 -%}
+{%- set H = maxy * scale * 1.6 + node_h + 24 -%}
+<svg viewBox="0 0 {{ W }} {{ H }}" width="{{ W }}" style="max-width:100%;height:auto" role="img" aria-label="formation grid">
+  <text x="{{ W - 4 }}" y="12" text-anchor="end" font-size="10" fill="#9aa1ad">front ▸ enemies</text>
+  {% if show_adj %}
+  {% for c in cells %}{% for j in c.adj %}{% if j > c.i %}{% set d = cells[j] %}
+    <line x1="{{ pad + c.x*scale }}" y1="{{ 20 + node_h/2 + c.y*scale*1.6 }}" x2="{{ pad + d.x*scale }}" y2="{{ 20 + node_h/2 + d.y*scale*1.6 }}" stroke="#343945" stroke-width="2"/>
+  {% endif %}{% endfor %}{% endfor %}
+  {% endif %}
+  {% for c in cells %}
+    {%- set cx = pad + c.x*scale -%}{%- set cy = 20 + c.y*scale*1.6 -%}
+    <g transform="translate({{ cx - node_w/2 }},{{ cy }})">
+      <title>Seat slot {{ c.i }}{% if c.hero %}: {{ c.hero.name }} (lvl {{ c.hero.level }}, {{ c.role }}){% if c.hero.specs %} · spec: {{ c.hero.specs|join(', ') }}{% endif %}{% endif %}{% if c.blocked %}: blocked (escort){% endif %}</title>
+      {% if c.blocked %}
+        <rect width="{{ node_w }}" height="{{ node_h }}" rx="6" fill="#1d2026" stroke="#555" stroke-dasharray="4 3"/>
+        <text x="{{ node_w/2 }}" y="{{ node_h/2 + 4 }}" text-anchor="middle" font-size="11" fill="#9aa1ad">escort</text>
+      {% elif c.hero %}
+        {%- set hl = highlight is not none and c.hero.id in highlight -%}
+        <rect width="{{ node_w }}" height="{{ node_h }}" rx="6" fill="#252931" stroke="{{ '#e0a84a' if hl else '#3d4350' }}" stroke-width="{{ 2.5 if hl else 1 }}"/>
+        <rect width="6" height="{{ node_h }}" rx="3" class="r-{{ c.role|replace(" ","-") }}"/>
+        <text x="12" y="{{ node_h*0.42 }}" font-size="{{ 12 if node_h > 30 else 9 }}" fill="#e6e8ec" font-weight="600">{{ c.hero.name[:12] }}</text>
+        {% if node_h > 30 %}
+        <text x="12" y="{{ node_h*0.78 }}" font-size="10" fill="#9aa1ad">{{ c.hero.level }} · {{ c.role }}</text>
+        {% endif %}
+        {% if familiars and r.familiars and c.i in r.familiars.seats %}
+          <circle cx="{{ node_w - 8 }}" cy="8" r="6" fill="#e0a84a"><title>familiar on this seat</title></circle>
+        {% endif %}
+      {% else %}
+        <rect width="{{ node_w }}" height="{{ node_h }}" rx="6" fill="none" stroke="#3d4350" stroke-dasharray="2 3"/>
+        <text x="{{ node_w/2 }}" y="{{ node_h/2 + 4 }}" text-anchor="middle" font-size="10" fill="#555b66">empty</text>
+      {% endif %}
+    </g>
+  {% endfor %}
+</svg>
+{%- endmacro %}
+
+{% macro thumb(r) -%}
+{%- set cells = r.cells -%}
+<svg viewBox="-6 -6 92 72" width="70" height="55">
+  {% for c in cells %}{% for j in c.adj %}{% if j > c.i %}{% set d = cells[j] %}
+    <line x1="{{ c.x }}" y1="{{ c.y }}" x2="{{ d.x }}" y2="{{ d.y }}" stroke="#343945" stroke-width="1.5"/>
+  {% endif %}{% endfor %}{% endfor %}
+  {% for c in cells %}
+    {% if c.blocked %}<circle cx="{{ c.x }}" cy="{{ c.y }}" r="5" fill="none" stroke="#666" stroke-dasharray="2 2"/>
+    {% elif c.hero %}<circle cx="{{ c.x }}" cy="{{ c.y }}" r="5.5" class="r-{{ c.role|replace(" ","-") }}"><title>{{ c.hero.name }}</title></circle>
+    {% else %}<circle cx="{{ c.x }}" cy="{{ c.y }}" r="4" fill="none" stroke="#444"/>{% endif %}
+  {% endfor %}
+</svg>
+{%- endmacro %}
+
+{% macro legend() -%}
+<span class="small muted">
+{% for role, col in [('main DPS','#e06a5a'),('dps','#e08a4a'),('support','#5b8fe0'),('speed','#5fbf7f'),('gold','#e0c04a'),('healing','#4ac0c0'),('debuff','#a77be0')] %}
+  <span class="dot" style="background:{{ col }}"></span>{{ role }}&nbsp;&nbsp;
+{% endfor %}
+</span>
+{%- endmacro %}
+
+{% macro status(a) -%}
+{% if a.completed %}<span class="pill ok" title="best area {{ a.best }} ≥ objective {{ a.objective }}">✓ done</span>
+{% elif a.best %}<span class="pill warn" title="best area reached">best {{ a.best }}/{{ a.objective }}</span>
+{% else %}<span class="pill">not run</span>{% endif %}
+{%- endmacro %}
+
+{% macro url(variant, adv, goal, patron=None) -%}
+?variant={{ variant }}&adv={{ adv }}&goal={{ goal|urlencode }}{% if patron %}&patron={{ patron }}{% endif %}
+{%- endmacro %}

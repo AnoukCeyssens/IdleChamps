@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{# Variant A — Explorer: tree sidebar picks ONE adventure; Run Goal tabs; grid is the hero; details in a right rail. #}
+{% block body %}
+{% set r = recommend(adv.id, goal, patron) %}
+<style>
+  .a-wrap { display:grid; grid-template-columns:280px 1fr 320px; min-height:calc(100vh - 24px); }
+  .a-side { border-right:1px solid var(--line); padding:12px; overflow:auto; max-height:calc(100vh - 24px); position:sticky; top:0; }
+  .a-side details { margin-bottom:6px; } .a-side summary { cursor:pointer; padding:4px 0; font-weight:600; }
+  .a-side .adv { display:flex; justify-content:space-between; gap:6px; padding:3px 6px; border-radius:4px; font-size:13px; }
+  .a-side .adv.on { background:var(--panel2); }
+  .a-side .var { padding-left:16px; font-size:12px; }
+  .a-main { padding:16px 20px 80px; }
+  .a-rail { border-left:1px solid var(--line); padding:16px; display:flex; flex-direction:column; gap:12px; padding-bottom:80px; }
+  .a-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:8px; }
+  .score { text-align:right; } .score b { font-size:20px; }
+</style>
+<div class="a-wrap">
+  <nav class="a-side">
+    <h3>Adventures</h3>
+    {% for c in tree %}
+      <details {% if c.id == adv.campaign_id %}open{% endif %}>
+        <summary>{{ c.name }} {% if c.is_event %}<span class="pill">event</span>{% endif %}</summary>
+        {% for a in c.adventures %}
+          <a class="adv {% if a.id == adv.id %}on{% endif %}" href="{{ m.url('A', a.id, goal) }}"><span>{{ a.name }}</span>{{ m.status(a) }}</a>
+          {% for v in a.variants %}
+            <a class="adv var {% if v.id == adv.id %}on{% endif %}" href="{{ m.url('A', v.id, goal) }}"><span>↳ {{ v.name }}</span>{{ m.status(v) }}</a>
+          {% endfor %}
+        {% endfor %}
+      </details>
+    {% endfor %}
+  </nav>
+
+  <main class="a-main">
+    <div class="a-head">
+      <div>
+        <div class="muted small">{{ adv.campaign }}{% if adv.parent %} · variant of {{ advs[adv.parent].name }}{% endif %}</div>
+        <h1>{{ adv.name }}</h1>
+        <div class="small">Objective: area {{ adv.objective }} · {{ m.status(adv) }} · <span class="muted">{{ adv.restrictions }}</span></div>
+        {% if adv.patrons %}
+        <div style="margin-top:6px" class="small">Patron:
+          <a class="pill {% if not patron %}ok{% endif %}" href="{{ m.url('A', adv.id, goal) }}">none</a>
+          {% for pid, area in adv.patrons.items() %}
+            <a class="pill {% if patron == pid %}ok{% endif %} {% if not patrons_unlocked.get(pid) %}lock{% endif %}" href="{{ m.url('A', adv.id, goal, pid) }}">{{ patron_names[pid] }} · {{ area }}{% if not patrons_unlocked.get(pid) %} 🔒{% endif %}</a>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+      <div class="score">
+        <div class="muted small">score (stub)</div><b>{{ r.score }}</b>
+        <div class="small muted">gap ≤ {{ r.gap }} · <a href="#" onclick="alert('Would run the exact solver (time-limited) in the background.');return false">prove optimal</a></div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      {% for g in goals %}<a class="{% if g == goal %}on{% endif %}" href="{{ m.url('A', adv.id, g, patron) }}">{{ g }}</a>{% endfor %}
+    </div>
+
+    <div class="panel" style="text-align:center">{{ m.grid(r) }}<div>{{ m.legend() }}</div></div>
+
+    <h2 style="margin-top:18px">Seats</h2>
+    <table>
+      <tr><th>Slot</th><th>Champion</th><th>Role</th><th>Specialization</th><th>Feats</th></tr>
+      {% for c in r.cells if c.hero %}
+      <tr><td>{{ c.i }}</td><td>{{ c.hero.name }} <span class="muted small">lvl {{ c.hero.level }}</span></td><td>{{ c.role }}</td>
+          <td>{{ c.hero.specs|join(', ') or '—' }}</td><td class="small">{{ c.hero.feats|join(', ') or '—' }}</td></tr>
+      {% endfor %}
+    </table>
+  </main>
+
+  <aside class="a-rail">
+    <div class="panel">
+      <h3>What would make this better</h3>
+      <ul class="clean">{% for h in r.hints %}<li>{{ h.text }} <span class="gain">{{ h.gain }}</span></li>{% endfor %}</ul>
+    </div>
+    <div class="panel">
+      <h3>Scoring Assumptions</h3>
+      <ul class="clean small">{% for s in r.assumptions %}<li>• {{ s }}</li>{% endfor %}</ul>
+    </div>
+    {% if r.familiars %}
+    <div class="panel"><h3>Familiars</h3>
+      <div class="small">{{ r.familiars.count }} owned: seats {{ r.familiars.seats|join(', ') }} (gold dot on grid){% if r.familiars.clicks %}, {{ r.familiars.clicks }} on clicks{% endif %}</div></div>
+    {% endif %}
+    {% if r.modron %}
+    <div class="panel"><h3>Modron core</h3>
+      <div class="small">Core {{ r.modron.core }} · reset at area <b>{{ r.modron.reset_area }}</b> <span class="muted">(currently {{ r.modron.current_goal }})</span> · formation: this one</div></div>
+    {% endif %}
+    {% if r.excluded %}
+    <div class="panel"><h3>Left out</h3>
+      <ul class="clean small muted">{% for n, why in r.excluded %}<li>{{ n }}: {{ why }}</li>{% endfor %}</ul></div>
+    {% endif %}
+  </aside>
+</div>
+{% endblock %}

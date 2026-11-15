@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{# Variant B — Matrix: no "current adventure". Every adventure × every Run Goal at once; a cell expands inline (htmx). #}
+{% block body %}
+<style>
+  .b-wrap { padding:16px 20px 90px; max-width:1300px; margin:0 auto; }
+  .b-filters { display:flex; gap:10px; align-items:center; margin:10px 0 14px; flex-wrap:wrap; }
+  .b-filters input, .b-filters select { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  .b-table td.cell { cursor:pointer; text-align:center; border-left:1px solid var(--line); }
+  .b-table td.cell:hover { background:var(--panel2); }
+  .b-table td.cell .sc { font-size:11px; color:var(--dim); font-variant-numeric:tabular-nums; }
+  .b-table tr.camp td { background:var(--panel); font-weight:600; }
+  .b-table tr.var td.name { padding-left:26px; font-size:13px; }
+  .b-detail td { background:#181b20; padding:14px 18px; }
+</style>
+<div class="b-wrap">
+  <h1>All adventures × Run Goals</h1>
+  <div class="muted small">{{ owned_count }} owned champions · click any cell to open its Formation Recommendation · {{ m.legend() }}</div>
+  <form class="b-filters" method="get">
+    <input type="hidden" name="variant" value="B">
+    <input name="q" value="{{ q }}" placeholder="filter by name…" size="24">
+    <select name="campaign"><option value="">all campaigns</option>
+      {% for c in tree %}<option value="{{ c.id }}" {% if campaign == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
+    </select>
+    <label class="small"><input type="checkbox" name="hide_done" value="true" {% if hide_done %}checked{% endif %}> hide completed</label>
+    <button class="pill" type="submit">apply</button>
+  </form>
+
+  <table class="b-table">
+    <tr><th>Adventure</th><th>Status</th>{% for g in goals %}<th style="text-align:center">{{ g }}</th>{% endfor %}</tr>
+    {% for c in tree if not campaign or c.id == campaign %}
+      <tr class="camp"><td colspan="6">{{ c.name }} {% if c.is_event %}<span class="pill">event</span>{% endif %}</td></tr>
+      {% for a in c.adventures %}
+        {% for x in [a] + a.variants %}
+          {% if (not q or q|lower in x.name|lower) and not (hide_done and x.completed) %}
+          <tr class="{{ 'var' if x.parent else '' }}" id="row-{{ x.id }}">
+            <td class="name">{% if x.parent %}↳ {% endif %}{{ x.name }}
+              {% if x.patrons %}<div class="small muted">patrons: {% for pid, ar in x.patrons.items() %}{{ patron_names[pid] }}{% if not patrons_unlocked.get(pid) %}🔒{% endif %} {% endfor %}</div>{% endif %}
+              {% if x.restrictions and x.restrictions != 'No restrictions' %}<div class="small muted">{{ x.restrictions[:90] }}</div>{% endif %}</td>
+            <td>{{ m.status(x) }}</td>
+            {% for g in goals %}{% set r = recommend(x.id, g) %}
+              <td class="cell" hx-get="/prototype/formation-view/cell?adv={{ x.id }}&goal={{ g|urlencode }}" hx-target="#detail-{{ x.id }}" hx-swap="innerHTML">
+                {{ m.thumb(r) }}<div class="sc">{{ r.score }}</div></td>
+            {% endfor %}
+          </tr>
+          <tr class="b-detail"><td colspan="6" id="detail-{{ x.id }}" style="padding:0"></td></tr>
+          {% endif %}
+        {% endfor %}
+      {% endfor %}
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}
