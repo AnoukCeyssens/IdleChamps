@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Model Status · Idle Champions Advisor{% endblock %}
+{% block main %}
+<style>
+  section.status { margin: 20px 0; }
+  section.status h2 { font-size: 17px; margin: 0 0 8px; }
+  section.status ul { list-style: none; padding: 0; margin: 0; }
+  section.status li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .muted { color: var(--muted); }
+  li.flag { color: #7a1f1f; }
+  li.check.failed { color: #7a1f1f; }
+  table.model-status { border-collapse: collapse; width: 100%; }
+  table.model-status td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--line); }
+  table.model-status a { color: inherit; }
+  .badge { font-size: 13px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--line); }
+  .badge.verified { border-color: #2b8a3e; color: #2b8a3e; }
+  .badge.check-failed { border-color: #c92a2a; color: #c92a2a; }
+  .badge.stale { border-color: #e67700; color: #e67700; }
+  form.data-folder button { font: inherit; padding: 3px 12px; border: 1px solid var(--accent); border-radius: 12px; background: #fff; color: var(--accent); cursor: pointer; }
+</style>
+<h1>Model Status</h1>
+
+<section class="status">
+  <h2>Model review flags</h2>
+  {% if flags %}
+  <ul>
+    {% for flag in flags %}<li data-row="model-flag" class="flag">{{ flag.text }}</li>{% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted" data-row="no-flags">No open model review flags.</p>
+  {% endif %}
+</section>
+
+<section class="status">
+  <h2>Live damage checks</h2>
+  {% if checks %}
+  <ul>
+    {% for c in checks %}
+    <li data-row="damage-check" class="check {{ c.outcome }}">Instance {{ c.instance_id }} · {{ c.adventure_name }} · Main DPS {{ c.main_dps.name }} · {{ c.summary() }} · {{ c.outcome }}: {{ c.reason }}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No running instance with a BUD to check: start a run and Refresh.</p>
+  {% endif %}
+</section>
+
+<section class="status">
+  <h2>Data</h2>
+  <ul>
+    <li data-row="placement-coverage">{{ coverage }}</li>
+    <li data-row="history-line">{{ history }}</li>
+  </ul>
+  {% if data_folder %}
+  <form method="post" action="/data-folder" class="data-folder">
+    <p><button type="submit" data-row="data-folder">Open the app data folder</button>
+    <span class="muted">{{ data_folder }}{% if opened %} (opened){% endif %}</span></p>
+  </form>
+  {% endif %}
+</section>
+
+<section class="status">
+  <h2>Champions</h2>
+  <table class="model-status">
+    {% for row in table %}{% set c = row.champion %}
+    <tr data-row="model-status">
+      <td><a href="/champions/{{ c.id }}">{{ c.name }}</a></td>
+      <td><span class="badge {{ row.status.value | lower | replace(' ', '-') }}">{{ row.status.value }}</span></td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

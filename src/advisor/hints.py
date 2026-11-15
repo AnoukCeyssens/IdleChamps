@@ -105,8 +105,11 @@ def candidate_changes(catalogue: Catalogue, account: Account, *, potions: bool =
     return tuple(changes)
 
 
-def what_if(catalogue: Catalogue, account: Account, change: Change) -> tuple[Account, ChampionModels]:
-    """The account with the change made, and Champion Models for it."""
+def what_if(
+    catalogue: Catalogue, account: Account, change: Change, *, statuses=None
+) -> tuple[Account, ChampionModels]:
+    """The account with the change made, and Champion Models for it (`statuses`: the Model Statuses
+    to carry over, `ChampionModels.statuses`)."""
     champions = dict(account.champions)
     if change.kind == "gear":
         owned = champions[change.champion_id]
@@ -119,7 +122,7 @@ def what_if(catalogue: Catalogue, account: Account, change: Change) -> tuple[Acc
     changed = replace(account, champions=champions)
     if change.kind == "modron":
         changed = replace(changed, modron_cores={**account.modron_cores, change.core_id: change.core_exp})
-    return changed, ChampionModels(catalogue, changed, potions=change.potion_effects)
+    return changed, ChampionModels(catalogue, changed, potions=change.potion_effects, statuses=statuses)
 
 
 def measure(
@@ -143,7 +146,7 @@ def measure(
     threshold = found + math.log1p(MIN_GAIN_PCT / 100) - _SLACK
     promising = []
     for change in changes:
-        changed, changed_models = what_if(catalogue, account, change)
+        changed, changed_models = what_if(catalogue, account, change, statuses=models.statuses)
         bound = bounder.bound(change, changed_models)
         if bound > threshold:
             promising.append((bound, change, changed, changed_models))

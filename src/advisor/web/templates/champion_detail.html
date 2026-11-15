@@ -23,6 +23,16 @@
   · {{ champion.source.label }} · Seat {{ champion.seat }}{% if champion.role_tags %} · {{ champion.role_tags | join(", ") }}{% endif %}
 </p>
 
+<section class="detail model-status">
+  <h2 data-row="model-status">Model Status: {{ model_status.value }}</h2>
+  <ul>
+    {% for e in model_evidence %}
+    <li data-row="model-evidence" class="{{ 'passed' if e.passed else 'failed' if e.passed is false else '' }}">{{ e.text }}</li>
+    {% endfor %}
+  </ul>
+  <p class="muted"><a href="/model-status">All Model Statuses and flags</a></p>
+</section>
+
 {% if owned %}
 <section class="detail">
   <h2>Gear</h2>
