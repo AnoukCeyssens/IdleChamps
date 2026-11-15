@@ -203,6 +203,9 @@
         </table>
       </div>
       <aside class="rail">
+        {% if rec.push_verdict and rec.push_verdict.placement_hint %}
+        <p data-row="placement-hint" class="placement-hint">{{ rec.push_verdict.placement_hint }}</p>
+        {% endif %}
         {% if rec.score is not none %}
         <p data-row="score" class="score">Score {{ rec.score | sci }} <span class="unit">{{ rec.score_label }}</span></p>
         <p data-row="gap" class="gap">at most {{ "%.0f" % rec.gap_pct if rec.gap_pct >= 1 or rec.gap_pct == 0 else "%.1f" % rec.gap_pct }}% from best</p>

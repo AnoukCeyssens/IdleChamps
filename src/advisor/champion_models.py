@@ -43,6 +43,22 @@ _GILD_FACTOR = {0: 1.0, 1: 1.5, 2: 2.0}
 
 _MAX_LOADOUTS = 64
 
+# Breaking (Push only, #17/#33): an Armoured or Hits-based boss must lose all its segments within
+# this many seconds. A formation that can't is penalised by this many log units per e-fold of
+# missing breaking rate, so the search trades damage for Breakers where bosses need them.
+BREAK_TIME_S = 120.0
+BREAKING_WEIGHT = 10.0
+DEFAULT_COOLDOWN_S = 5.0  # an attack whose definition isn't loaded
+
+# Generic Breaker keys: extra segments per hit (and on which boss kinds), and hit multipliers.
+_BREAK_EXTRA_KEYS = {
+    "increase_damage_against_monster_armor": frozenset({"armoured"}),
+    "increase_damage_against_monster_hits": frozenset({"hits"}),
+    "increase_damage_against_monster_armor_and_hits": frozenset({"armoured", "hits"}),
+    "increase_damage_on_armor_and_hits": frozenset({"armoured", "hits"}),
+    "increase_num_unique_hits": frozenset({"armoured", "hits"}),
+}
+_BREAK_MULT_KEYS = {"unique_hit_multiplier": frozenset({"armoured", "hits"})}
 # --- Gem Farm run model (spec #22: gems per hour from speed, stacking time, reset area, run length) ---
 # Monster health grows by this factor per area (research/push-area-reach.md §1.2: core campaigns 2.031,
 # events 1.85; Avernus, Rime and Vecna differ slightly and use the core value here).
@@ -123,6 +139,23 @@ class FormationScore:
 
 
 @dataclass(frozen=True)
+class BreakingNeed:
+    """A boss the Push formation must break: Armoured ("armoured") or Hits-based ("hits"), with its
+    segment count."""
+
+    kind: str
+    segments: float
+
+
+@dataclass(frozen=True)
+class _BreakEffect:
+    op: str  # "extra" (segments added per hit) | "mult" (hits multiplied by 1 + amount / 100)
+    amount: float
+    kinds: frozenset[str]
+    targets: tuple
+
+
+@dataclass(frozen=True)
 class _Effect:
     kind: str  # "damage" | "gold"
     log: float  # log of the multiplier
@@ -152,6 +185,8 @@ class ChampionModels:
         self.account = account
         self.potions = tuple(potions)
         self._effects = cache(self._build_effects)
+        self._break_effects = cache(self._build_break_effects)
+        self.break_ceiling = cache(self._build_break_ceiling)
         self._potion_effects = cache(self._build_potion_effects)
 
     # --- interface ---------------------------------------------------------------------------
@@ -175,9 +210,14 @@ class ChampionModels:
         combos = itertools.product(spec_combos or [()], feat_sets)
         return tuple(Loadout(tuple(s), f) for s, f in itertools.islice(combos, _MAX_LOADOUTS))
 
-    def scorer(self, layout: Sequence[Slot], run_goal: str, main_dps: Seat, *, adventure: Adventure | None = None) -> Scorer:
+    def scorer(
+        self, layout: Sequence[Slot], run_goal: str, main_dps: Seat, *, adventure: Adventure | None = None,
+        breaking: Sequence[BreakingNeed] = (),
+    ) -> Scorer:
+        """`breaking`: the Armoured and Hits-based bosses a Push formation must break (Push only)."""
         gem_farm = self._gem_farm(adventure) if run_goal == "Gem Farm" else None
-        return Scorer(self, {s.index: s for s in layout}, run_goal, main_dps, gem_farm)
+        return Scorer(self, {s.index: s for s in layout}, run_goal, main_dps, gem_farm,
+                      tuple(breaking) if run_goal == "Push" else ())
 
     def _gem_farm(self, adventure: Adventure | None) -> GemFarm:
         """The run model for this adventure: anchored on the player's best area there."""
@@ -229,6 +269,63 @@ class ChampionModels:
         champion = self.catalogue.find(champion_id)
         return champion.base_damage if champion and champion.base_damage > 0 else 1.0
 
+    def break_effects(self, champion_id: int, loadout: Loadout) -> tuple[_BreakEffect, ...]:
+        return self._break_effects(champion_id, loadout)
+
+    def hit_rates(self, champion_id: int) -> tuple[float, float, float | None]:
+        """(base attack hits per second on one boss, ultimate hits per second when it is used once
+        within `BREAK_TIME_S`, the ultimate's damage per hit as a fraction of BUD). Multi-target
+        attacks count as one hit on the boss; damage-over-time ticks and multi-hit fields count as
+        hits. Clicks and familiars don't count."""
+        champion = self.catalogue.find(champion_id)
+        base_id = champion.base_attack_id if champion else None
+        base = self.catalogue.attacks.get(base_id) if base_id else None
+        cooldown = (base.cooldown if base else None) or self.catalogue.attack_cooldowns.get(base_id) or DEFAULT_COOLDOWN_S
+        per_s = (base.hits_per_use if base else 1.0) / cooldown
+        ult_id = champion.ultimate_attack_id if champion else None
+        ult = self.catalogue.attacks.get(ult_id) if ult_id else None
+        return per_s, (ult.hits_per_use / BREAK_TIME_S if ult else 0.0), (ult.damage_modifier if ult else None)
+
+    def _build_break_effects(self, champion_id: int, loadout: Loadout) -> tuple[_BreakEffect, ...]:
+        found = []
+        for _, effect, fields in self._sources(champion_id, loadout):
+            key = _key(effect)
+            if key not in _BREAK_EXTRA_KEYS and key not in _BREAK_MULT_KEYS:
+                continue
+            if _COMPLEX_FIELDS & set(fields):
+                continue  # conditional Breaker effects belong to per-champion reconstructions
+            amount = _float(_params(effect), 0)
+            if amount is None and key == "increase_num_unique_hits":
+                amount = 1.0
+            raw = fields.get("targets")
+            if raw is None:
+                targets = ("all",) if key in _BREAK_MULT_KEYS else ("self",)
+            else:
+                targets = tuple(raw if isinstance(raw, list) else [raw])
+            if amount is None or amount <= 0 or not all(isinstance(t, str) and t in _TARGETS for t in targets):
+                continue
+            if key in _BREAK_MULT_KEYS:
+                found.append(_BreakEffect("mult", amount, _BREAK_MULT_KEYS[key], targets))
+            else:
+                found.append(_BreakEffect("extra", amount, _BREAK_EXTRA_KEYS[key], targets))
+        return tuple(found)
+
+    def _build_break_ceiling(self, kind: str) -> tuple[float, float]:
+        """(most extra segments per hit, largest hit multiplier) any formation of owned champions could
+        give: the sum and product over every owned champion's best loadout. Keeps `Scorer.bound` honest."""
+        extra, mult = 0.0, 1.0
+        for champion_id in self.account.champions:
+            if self.catalogue.find(champion_id) is None:
+                continue
+            best_extra, best_mult = 0.0, 1.0
+            for loadout in self.loadouts(champion_id):
+                effects = [e for e in self.break_effects(champion_id, loadout) if kind in e.kinds]
+                best_extra = max(best_extra, sum(e.amount for e in effects if e.op == "extra"))
+                best_mult = max(best_mult, math.prod(1 + e.amount / 100 for e in effects if e.op == "mult"))
+            extra += best_extra
+            mult *= best_mult
+        return extra, mult
+
     def potion_effects(self) -> tuple[_Effect, ...]:
         """The potions' generic effects; they reach every champion, so the Main DPS."""
         return self._potion_effects()
@@ -245,8 +342,9 @@ class ChampionModels:
         feat = self.catalogue.feats.get(feat_id)
         return bool(feat and any(_key(e) in _DAMAGE_KEYS or _key(e) in _GOLD_KEYS for e in feat.effects))
 
-    def _build_effects(self, champion_id: int, loadout: Loadout) -> tuple[_Effect, ...]:
-        sources: list[tuple[int | None, str, Mapping]] = []  # (upgrade id, effect string, effect-key fields)
+    def _sources(self, champion_id: int, loadout: Loadout) -> list[tuple[int | None, str, Mapping]]:
+        """(upgrade id, effect string, effect-key fields) of every effect the loadout has."""
+        sources: list[tuple[int | None, str, Mapping]] = []
         chosen = set(loadout.specializations)
         for upgrade in self.catalogue.upgrades_of(champion_id):
             if upgrade.is_specialization and upgrade.id not in chosen:
@@ -267,7 +365,10 @@ class ChampionModels:
             feat = self.catalogue.feats.get(feat_id)
             for effect in feat.effects if feat else ():
                 sources.append((None, effect, {}))
+        return sources
 
+    def _build_effects(self, champion_id: int, loadout: Loadout) -> tuple[_Effect, ...]:
+        sources = self._sources(champion_id, loadout)
         buffs: dict[int, float] = defaultdict(float)  # upgrade id -> % added to its effect
         for _, effect, _fields in sources:
             if _key(effect) in _BUFF_KEYS:
@@ -308,12 +409,13 @@ class Scorer:
 
     def __init__(
         self, models: ChampionModels, slots: Mapping[int, Slot], run_goal: str, main_dps: Seat,
-        gem_farm: GemFarm | None = None,
+        gem_farm: GemFarm | None = None, breaking: tuple[BreakingNeed, ...] = (),
     ) -> None:
         self.models = models
         self.slots = slots
         self.run_goal = run_goal
         self.main_dps = main_dps
+        self.breaking = breaking
         self.gem_farm = gem_farm
         self._damage_weight = GOLD_PER_DAMAGE_EXPONENT if run_goal == "Gold Farm" else 1.0
         self._gold_weight = 1.0 if run_goal == "Gold Farm" else 0.0
@@ -355,18 +457,78 @@ class Scorer:
             damage_log += damage
             gold_log += gold
             contributions[seat.champion_id] = Contribution(_pct(damage), _pct(gold))
-        return FormationScore(
-            value=self._damage_weight * damage_log + self._gold_weight * gold_log,
-            bud=math.exp(min(damage_log, 700)),
-            contributions=contributions,
-        )
+        value = self._damage_weight * damage_log + self._gold_weight * gold_log
+        if self.breaking:
+            rates = {kind: self.breaking_rate(seats, kind) for kind in {n.kind for n in self.breaking}}
+            value += BREAKING_WEIGHT * sum(
+                min(0.0, math.log(rates[n.kind] * BREAK_TIME_S / n.segments)) for n in self.breaking
+            )
+        return FormationScore(value=value, bud=math.exp(min(damage_log, 700)), contributions=contributions)
+
+    def breaking_rate(
+        self, seats: Iterable[Seat], kind: str, *, main_qualifies: bool = True, ult_min_modifier: float | None = None
+    ) -> float:
+        """Segments per second the formation breaks on one boss of `kind` ("armoured" | "hits").
+
+        Hits-based: every champion's hits count. Armoured: only hits at or above the chunk's health
+        count: the Main DPS's (when `main_qualifies`) and ultimates whose damage per hit is at least
+        `ult_min_modifier` × BUD (None: every ultimate). Generic Breaker effects reaching a champion
+        add segments per hit or multiply its hits."""
+        seats = tuple(seats)
+        if self.main_dps not in seats:
+            seats = (self.main_dps, *seats)
+        effects = [
+            (seat, e) for seat in seats for e in self.models.break_effects(seat.champion_id, seat.loadout)
+            if kind in e.kinds
+        ]
+        rate = 0.0
+        for seat in seats:
+            per_s, ult, ult_modifier = self.models.hit_rates(seat.champion_id)
+            is_main = seat.champion_id == self.main_dps.champion_id
+            hits = per_s if kind == "hits" or (is_main and main_qualifies) else 0.0
+            if ult_min_modifier is None or (ult_modifier is not None and ult_modifier >= ult_min_modifier):
+                hits += ult
+            if not hits:
+                continue
+            extra, mult = 0.0, 1.0
+            for source, effect in effects:
+                if _lands(self.slots, effect.targets, source, seat, is_main):
+                    if effect.op == "extra":
+                        extra += effect.amount
+                    else:
+                        mult *= 1 + effect.amount / 100
+            rate += hits * (1 + extra) * mult
+        return rate
 
     def bound(self, seat: Seat) -> float:
         """Generic effects are separable: a seat adds exactly its own reach, so the bound is exact."""
         if seat not in self._bounds:
             damage, gold = self._reach(seat)
-            self._bounds[seat] = self._damage_weight * damage + self._gold_weight * gold
+            self._bounds[seat] = self._damage_weight * damage + self._gold_weight * gold + self._breaking_bound(seat)
         return self._bounds[seat]
+
+    def _breaking_bound(self, seat: Seat) -> float:
+        """Most a seat can lift the breaking penalty. Each need's term is min(0, log rate), and adding a
+        seat multiplies the rate by at most (1 + its own hits at the best possible extras and
+        multipliers ÷ the Main DPS's bare hits) × (1 + each extra it gives) × (each multiplier it gives),
+        and never by more than the Main DPS alone falls short."""
+        if not self.breaking:
+            return 0.0
+        floor = self.models.hit_rates(self.main_dps.champion_id)[0]
+        per_s, ult, _ = self.models.hit_rates(seat.champion_id)
+        total = 0.0
+        for need in self.breaking:
+            extra, mult = self.models.break_ceiling(need.kind)
+            own = (per_s if need.kind == "hits" else 0.0) + ult
+            log_gain = math.log1p(own * (1 + extra) * mult / floor)
+            for e in self.models.break_effects(seat.champion_id, seat.loadout):
+                if need.kind in e.kinds:
+                    log_gain += math.log1p(e.amount) if e.op == "extra" else math.log1p(e.amount / 100)
+            # Seats only ever raise the rate, so no seat lifts more than the Main DPS alone is missing.
+            alone = self.breaking_rate((), need.kind)
+            missing = -min(0.0, math.log(alone * BREAK_TIME_S / need.segments)) if alone > 0 else math.inf
+            total += BREAKING_WEIGHT * min(log_gain, missing)
+        return total
 
     def _reach(self, seat: Seat) -> tuple[float, float]:
         """Log damage multiplier this seat gives the Main DPS, and log gold multiplier."""
@@ -379,35 +541,39 @@ class Scorer:
         return damage, gold
 
     def _reaches(self, targets: tuple, source: Seat) -> bool:
-        main = self.main_dps
-        is_self = source.champion_id == main.champion_id
-        src, dst = self.slots.get(source.slot), self.slots.get(main.slot)
-        for target in targets:
-            if isinstance(target, tuple):
-                if target[1] == main.champion_id:
-                    return True
-                continue
-            if target in ("all", "bud_setter") or (target == "self" and is_self):
+        return _lands(self.slots, targets, source, self.main_dps)
+
+
+def _lands(slots: Mapping[int, Slot], targets: tuple, source: Seat, dest: Seat, dest_is_main: bool = True) -> bool:
+    """Does an effect of `source` with these targets reach the champion in seat `dest`?"""
+    is_self = source.champion_id == dest.champion_id
+    src, dst = slots.get(source.slot), slots.get(dest.slot)
+    for target in targets:
+        if isinstance(target, tuple):
+            if target[1] == dest.champion_id:
                 return True
-            if is_self or src is None or dst is None:
-                continue
-            adjacent = dst.index in src.adjacent
-            column_step = dst.column - src.column
-            if (
-                (target == "adj" and adjacent)
-                or (target == "non_adj" and not adjacent)
-                or (target == "behind" and adjacent and column_step == 1)
-                or (target == "ahead" and adjacent and column_step == -1)
-                or (target == "col" and column_step == 0)
-                or (target == "next_col" and column_step == 1)
-                or (target == "prev_col" and column_step == -1)
-                or (target == "prev_and_next_col" and abs(column_step) == 1)
-                or (target == "next_two_col" and column_step in (1, 2))
-                or (target == "prev_two_col" and column_step in (-1, -2))
-                or (target == "front_column" and dst.column == min(s.column for s in self.slots.values()))
-            ):
-                return True
-        return False
+            continue
+        if target == "all" or (target == "bud_setter" and dest_is_main) or (target == "self" and is_self):
+            return True
+        if is_self or src is None or dst is None:
+            continue
+        adjacent = dst.index in src.adjacent
+        column_step = dst.column - src.column
+        if (
+            (target == "adj" and adjacent)
+            or (target == "non_adj" and not adjacent)
+            or (target == "behind" and adjacent and column_step == 1)
+            or (target == "ahead" and adjacent and column_step == -1)
+            or (target == "col" and column_step == 0)
+            or (target == "next_col" and column_step == 1)
+            or (target == "prev_col" and column_step == -1)
+            or (target == "prev_and_next_col" and abs(column_step) == 1)
+            or (target == "next_two_col" and column_step in (1, 2))
+            or (target == "prev_two_col" and column_step in (-1, -2))
+            or (target == "front_column" and dst.column == min(s.column for s in slots.values()))
+        ):
+            return True
+    return False
 
 
 @dataclass(frozen=True)

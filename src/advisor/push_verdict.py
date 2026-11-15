@@ -14,19 +14,23 @@ Damage-only, anchored relative estimate:
   objective. Without known monster placement the verdict is capped at Borderline.
 - **Facts win**: "Reached before (area N)" when the best area already meets a non-patron objective.
 
-Breaking checks (Armoured and Hits-based bosses) need monster placement (the Area Set Cache, a later
-ticket); until then every verdict is damage-only.
+- **Breaking** (#33): with monster placement known (the adventure's Area Set is in the Area Set
+  Cache), every Armoured or Hits-based boss before the damage wall must be broken within 120 s
+  (`_breaking_failure`); the first that can't be ends the estimate there. Unknown placement keeps the
+  verdict damage-only, capped at Borderline, with a hint naming an adventure to load in-game.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from advisor.account import Account, GameInstance
+from advisor.area_sets import BREAKING_CHANGES, BREAKING_PROPERTIES, AreaSet, boss_health
+from advisor.explorer import same_area_set_to_load
 from advisor.catalogue import Adventure, Catalogue, Champion, HealthCurve
-from advisor.champion_models import ChampionModels, Loadout, ModelStatus, Seat
+from advisor.champion_models import BREAK_TIME_S, BreakingNeed, ChampionModels, Loadout, ModelStatus, Seat
 
 KILL_TIME_S = 30.0  # a boss must die within this many seconds of Main DPS hits
 DEFAULT_COOLDOWN_S = 5.0  # when the Main DPS's attack definition isn't loaded
@@ -76,6 +80,7 @@ class PushVerdict:
     anchor: AnchorRun | None = None
     capped: bool = False  # Likely capped to Borderline (placement unknown)
     assumptions: tuple[str, ...] = ()
+    placement_hint: str | None = None  # "Load <adventure> in-game, then Refresh" while placement is unknown
 
 
 def push_verdict(
@@ -87,23 +92,38 @@ def push_verdict(
     formation: Sequence[Seat],
     main_dps: Seat | None,
     *,
-    placement_known: bool = False,
+    placement_known: bool | None = None,  # default: whether the Area Set Cache holds the adventure's set
 ) -> PushVerdict:
     """The Push Verdict for `formation` (built around `main_dps`) on `adventure`, under `patron`."""
     objective = adventure.patron_objectives.get(patron) if patron is not None else adventure.objective_area
     best = account.best_areas.get(adventure.id)
     if patron is None and objective is not None and best is not None and best >= objective:
         return PushVerdict("reached", f"Reached before (area {best})", objective, best)
+    if placement_known is None:
+        placement_known = area_set(catalogue, adventure) is not None
+    hint = None if placement_known else placement_hint(catalogue, account, adventure)
     reason, _ = _modifiers(adventure)
     if reason:
-        return PushVerdict("not_available", f"Estimate not available: {reason}", objective, best)
+        return PushVerdict("not_available", f"Estimate not available: {reason}", objective, best, placement_hint=hint)
     if main_dps is None:
-        return PushVerdict("not_available", "Estimate not available: no legal formation", objective, best)
+        return PushVerdict("not_available", "Estimate not available: no legal formation", objective, best,
+                           placement_hint=hint)
     anchor = choose_anchor(catalogue, account, main_dps.champion_id)
     if anchor is None:
-        return PushVerdict("no_estimate", NO_ANCHOR, objective, best)
-    return _estimate(catalogue, account, models, adventure, patron, formation, main_dps, anchor, objective, best,
-                     placement_known)
+        return PushVerdict("no_estimate", NO_ANCHOR, objective, best, placement_hint=hint)
+    verdict = _estimate(catalogue, account, models, adventure, patron, formation, main_dps, anchor, objective, best,
+                        placement_known)
+    return replace(verdict, placement_hint=hint)
+
+
+def area_set(catalogue: Catalogue, adventure: Adventure) -> AreaSet | None:
+    """The adventure's Area Set when the Area Set Cache holds it (monster placement known)."""
+    return catalogue.area_sets.get(adventure.area_set_id) if adventure.area_set_id is not None else None
+
+
+def placement_hint(catalogue: Catalogue, account: Account, adventure: Adventure) -> str | None:
+    to_load = same_area_set_to_load(catalogue, account, adventure)
+    return f"Load {to_load.name} in-game, then Refresh" if to_load else None
 
 
 def instance_estimate(catalogue: Catalogue, account: Account, models: ChampionModels, instance: GameInstance) -> PushVerdict | None:
@@ -123,7 +143,7 @@ def instance_estimate(catalogue: Catalogue, account: Account, models: ChampionMo
         adventure.patron_objectives.get(instance.patron_id) if instance.patron_id else adventure.objective_area
     )
     return _estimate(catalogue, account, models, adventure, instance.patron_id, seats, main, anchor, objective,
-                     account.best_areas.get(adventure.id), False)
+                     account.best_areas.get(adventure.id), area_set(catalogue, adventure) is not None)
 
 
 def choose_anchor(catalogue: Catalogue, account: Account, main_dps_id: int) -> AnchorRun | None:
@@ -176,6 +196,14 @@ def _estimate(catalogue, account, models, adventure, patron, formation, main_dps
     hits = max(1.0, KILL_TIME_S / (cooldown or DEFAULT_COOLDOWN_S))
     log_damage = math.log(anchor.instance.bud) + s_formation - s_anchor + math.log(hits)
     area = wall_area(curve, log_damage, log_health_mult)
+    checked = area_set(catalogue, adventure) if placement_known else None
+    failure = None
+    if checked is not None:
+        scorer = models.scorer(adventure.layout, "Push", main_dps)
+        log_hit = math.log(anchor.instance.bud) + s_formation - s_anchor  # the Main DPS's biggest hit
+        failure = _breaking_failure(curve, log_health_mult, checked, adventure, scorer, formation, log_hit, area + 1)
+        if failure is not None:
+            area = min(area, failure[0] - 1)
     expected = int(5 * round(area / 5))
 
     ids = {s.champion_id for s in formation} | {s.champion_id for s in anchor_seats} | {main.id}
@@ -214,9 +242,79 @@ def _estimate(catalogue, account, models, adventure, patron, formation, main_dps
     ]
     if not placement_known:
         assumptions.append(f"{PLACEMENT_UNKNOWN[0].upper()}{PLACEMENT_UNKNOWN[1:]}: the verdict is at best Borderline.")
+    elif checked is not None:
+        assumptions.append(
+            f"Armoured and hits-based bosses checked: monster placement from Area Set {checked.id}; a boss must be "
+            f"broken within {BREAK_TIME_S:.0f} s. Clicks and familiars don't count as hits, a multi-target attack "
+            "counts as one hit on the boss, and each ultimate is used once per boss."
+        )
+        assumptions.append(
+            "An armoured chunk has the boss's health ÷ its segments; only the Main DPS's hits (and ultimates "
+            "hitting that hard) break it."
+        )
+        if failure is not None:
+            assumptions.append(failure[1])
+        if checked.game_version and catalogue.game_version and checked.game_version != catalogue.game_version:
+            assumptions.append(
+                f"Area Set {checked.id} was last seen under game version {checked.game_version} (now "
+                f"{catalogue.game_version}): monster placement may be outdated."
+            )
     if patron is not None:
         assumptions.append("Patron objectives are always estimated: the best area is shared with the base adventure.")
     return PushVerdict(kind, label, objective, best, expected, area, band, anchor, capped, tuple(assumptions))
+
+
+def breaking_needs(catalogue: Catalogue, adventure: Adventure, patron: int | None) -> tuple[BreakingNeed, ...]:
+    """The Armoured and Hits-based bosses a Push formation must break on the way to the objective
+    (the whole Area Set in free play), when the adventure's monster placement is known."""
+    found = area_set(catalogue, adventure)
+    if found is None or not found.length:
+        return ()
+    objective = adventure.patron_objectives.get(patron) if patron is not None else adventure.objective_area
+    horizon = min(objective or found.length, found.length)
+    needs = []
+    for area in range(5, horizon + 1, 5):
+        for monster in found.bosses(area):
+            health = boss_health(monster, adventure.game_changes)
+            if health.kind != "normal":
+                needs.append(BreakingNeed(health.kind, health.segments))
+    return tuple(dict.fromkeys(needs))
+
+
+def _breaking_failure(curve, log_health_mult, found: AreaSet, adventure, scorer, formation, log_hit, until):
+    """(area, why) of the first Armoured or Hits-based boss the formation can't break, up to `until`."""
+    log_normal = math.log(curve.base_health)
+    rates: dict[tuple, float] = {}
+    for area in range(1, min(until, MAX_AREA) + 1):
+        if area > 1:
+            log_normal += math.log(_growth(curve, area))
+        if area % 5:
+            continue
+        for monster in found.bosses(area):
+            health = boss_health(monster, adventure.game_changes)
+            name = monster.get("name") or f"monster {monster.get('id')}"
+            if health.kind == "hits":
+                key = ("hits",)
+                if key not in rates:
+                    rates[key] = scorer.breaking_rate(formation, "hits")
+                rate, what = rates[key], f"hits-based, {health.segments:g} hits"
+            elif health.kind == "armoured":
+                log_chunk = log_normal + math.log(health.health_modifier) + log_health_mult - math.log(health.segments)
+                qualifies = log_hit >= log_chunk
+                rate = scorer.breaking_rate(
+                    formation, "armoured", main_qualifies=qualifies, ult_min_modifier=math.exp(min(log_chunk - log_hit, 700))
+                )
+                what = f"armoured, {health.segments:g} chunks"
+                if rate <= 0:
+                    return area, (f"Breaking: {name} at area {area} ({what}): no hit reaches its chunk health, so the "
+                                  f"estimate stops at area {area - 1}.")
+            else:
+                continue
+            seconds = health.segments / rate if rate > 0 else math.inf
+            if seconds > BREAK_TIME_S:
+                return area, (f"Breaking: {name} at area {area} ({what}) takes {seconds:.0f} s to break, over the "
+                              f"{BREAK_TIME_S:.0f} s limit, so the estimate stops at area {area - 1}.")
+    return None
 
 
 def _modifiers(adventure: Adventure) -> tuple[str | None, float]:
@@ -225,7 +323,7 @@ def _modifiers(adventure: Adventure) -> tuple[str | None, float]:
     log_mult = 0.0
     for change in adventure.game_changes:
         kind = str(change.get("type") or "")
-        if kind in _NEUTRAL or kind in _PLACEMENT:
+        if kind in _NEUTRAL or kind in _PLACEMENT or kind in BREAKING_CHANGES:
             continue
         if "timer" in kind or "time_limit" in kind:
             reasons["timer"] = reasons["timer"] or "timed adventure"
@@ -246,6 +344,8 @@ def _health_multiplier(change: dict) -> float | None:
     for props in (g for g in groups if g is not None):
         if not isinstance(props, dict):
             return None
+        if "override_health_multiplier" in props and not (props.get("armor_based_damage") or props.get("hits_based_damage")):
+            return None  # a health override on ordinary monsters: not handled
         for key, value in props.items():
             if key == "health_multiplier" and isinstance(value, (int, float)):
                 if change.get("affects_bosses", True) is not False:
@@ -253,7 +353,7 @@ def _health_multiplier(change: dict) -> float | None:
             elif key == "monster_effects":
                 if not all(isinstance(e, str) and e.split(",", 1)[0].strip() in _HARMLESS_MONSTER_EFFECTS for e in value or ()):
                     return None
-            elif key not in _HARMLESS_PROPERTIES:
+            elif key not in _HARMLESS_PROPERTIES and key not in BREAKING_PROPERTIES:
                 return None
     return mult
 

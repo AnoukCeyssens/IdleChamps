@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,6 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from advisor.account import Account, parse_account
+from advisor.area_sets import merge as merge_area_sets
 from advisor.catalogue import GEAR_SLOTS, ROLE_TAGS, Catalogue, parse_catalogue
 from advisor.champion_models import ChampionModels
 from advisor.explorer import RUN_GOALS, adventure_node, is_running, tree
@@ -41,11 +43,13 @@ def create_app(
     recompute: Recompute | None = None,
     focus: FocusSets | None = None,
     steps: Steps | None = None,
+    store: Store | None = None,
 ) -> FastAPI:
     """The advisor, either in offline mode on a request log (the game's or a fixture), or
     live: showing the Store's cached data and refreshing it from the game servers.
     `recompute` holds the Formation Recommendations (precomputed after each Refresh in live
-    mode); by default they are computed on demand when a tab is opened."""
+    mode); by default they are computed on demand when a tab is opened. With a `store`, the Area
+    Set Cache there takes in every set the responses bring and serves all it holds."""
     raw: RawResponses = OfflineGameClient(log_path).fetch() if live is None else live.responses()
     catalogue, account = Catalogue(champions=()), Account(champions={})
     models = ChampionModels(catalogue, account)
@@ -61,6 +65,10 @@ def create_app(
             return  # live mode before the first Refresh: nothing to show yet
         raw = responses
         catalogue = parse_catalogue(raw)
+        if store is not None:
+            cache = merge_area_sets(store.load_area_sets(), catalogue.area_sets)
+            store.save_area_sets(cache)
+            catalogue = replace(catalogue, area_sets=cache)
         account = parse_account(raw)
         models = ChampionModels(catalogue, account)
         results.update(raw, catalogue, account, models, precompute=refreshed)
@@ -281,6 +289,7 @@ def create_live_app(
     return create_app(
         live=refresher,
         recompute=Recompute(_RECOMMENDED_GOALS, store=store, executor=executor),
+        store=store,
         focus=FocusSets(store),
         steps=Steps(steps_executor),  # Next Steps' Focus adventures, measured in the background
     )

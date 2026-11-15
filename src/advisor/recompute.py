@@ -14,13 +14,15 @@ side. Anything not precomputed (a patron variant, a job that failed) is computed
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import threading
 from collections.abc import Callable, Iterable
 from concurrent.futures import Executor, Future, ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+from advisor import area_sets
 from advisor.account import Account, parse_account
 from advisor.catalogue import Adventure, Catalogue, parse_catalogue
 from advisor.champion_models import ChampionModels
@@ -46,6 +48,12 @@ def _code_fingerprint() -> str:
 
 
 CODE = _code_fingerprint()
+
+
+def _area_sets_key(catalogue: Catalogue) -> str:
+    """Fingerprint of the Area Set Cache: a set learnt or overwritten changes Push verdicts."""
+    data = json.dumps(area_sets.to_json(catalogue.area_sets), sort_keys=True)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -79,7 +87,7 @@ class Recompute:
     ) -> None:
         """New data loaded. `precompute`: start a recompute if the results for it are missing
         (after a Refresh); otherwise only reuse what the Store holds (at start)."""
-        key = (account.recommendation_key, str(raw["getdefinitions"].get("checksum")), CODE)
+        key = (account.recommendation_key, str(raw["getdefinitions"].get("checksum")), CODE, _area_sets_key(catalogue))
         with self._update_lock:
             with self._lock:
                 self._inputs = (catalogue, account, models)
@@ -144,7 +152,7 @@ class Recompute:
             with self._lock:
                 self._old, self._complete = {}, True
             return
-        pool = self._executor_factory(_init_worker, (dict(raw),))
+        pool = self._executor_factory(_init_worker, (dict(raw), dict(catalogue.area_sets)))
         with self._lock:
             self._pool, self._done, self._total = pool, 0, len(adventures)
         for adventure_id in adventures:
@@ -211,9 +219,12 @@ class Recompute:
 _WORKER: tuple[Catalogue, Account, ChampionModels] | None = None
 
 
-def _init_worker(raw: RawResponses) -> None:
+def _init_worker(raw: RawResponses, area_sets: dict | None = None) -> None:
+    """`area_sets`: the Area Set Cache the app holds (live mode keeps more sets than the snapshot brings)."""
     global _WORKER
     catalogue, account = parse_catalogue(raw), parse_account(raw)
+    if area_sets is not None:
+        catalogue = replace(catalogue, area_sets=area_sets)
     _WORKER = (catalogue, account, ChampionModels(catalogue, account))
 
 

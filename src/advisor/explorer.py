@@ -7,6 +7,7 @@ draws it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from advisor.account import Account
 from advisor.catalogue import Adventure, Campaign, Catalogue
@@ -95,4 +96,50 @@ def tree(catalogue: Catalogue, account: Account) -> tuple[CampaignNode, ...]:
             adventures=tuple(adventure_node(catalogue, account, a) for a in by_campaign[c.id]),
         )
         for c in campaigns
+    )
+
+
+def is_unlocked(catalogue: Catalogue, account: Account, adventure: Adventure) -> bool:
+    """Can I start this adventure now? It must be startable (`is_running`) and meet its
+    `requirements`: completed adventures, a count of completions in a campaign, a date. Other
+    conditions (event year unlocks, champion availability) aren't in the snapshot and count as met.
+    An adventure I have a best area in, or a game instance on, was unlocked."""
+    if not is_running(catalogue, account, adventure):
+        return False
+    if account.best_areas.get(adventure.id) or any(i.adventure_id == adventure.id for i in account.instances):
+        return True  # played before: it was unlocked
+    for requirement in adventure.requirements:
+        if not isinstance(requirement, dict):
+            continue
+        condition = requirement.get("condition")
+        if condition == "adventure_complete":
+            needed = catalogue.adventure(int(requirement.get("adventure_id") or 0))
+            if needed is None or not _is_done(account, needed):
+                return False
+        elif condition == "adventures_completed":
+            campaign_id = int(requirement.get("campaign_id") or 0)
+            done = sum(1 for a in catalogue.adventures if a.campaign_id == campaign_id and _is_done(account, a))
+            if done < int(requirement.get("count") or 0):
+                return False
+        elif condition == "date" and account.server_time is not None:
+            now = datetime.fromtimestamp(account.server_time, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            if str(requirement.get("date") or "") > now:
+                return False
+    return True
+
+
+def same_area_set_to_load(catalogue: Catalogue, account: Account, adventure: Adventure) -> Adventure | None:
+    """An unlocked adventure sharing `adventure`'s Area Set, to load in-game so a Refresh brings its
+    monster placement: the adventure itself if possible, then base adventures before variants."""
+    if adventure.area_set_id is None:
+        return None
+    sharing = [a for a in catalogue.adventures if a.area_set_id == adventure.area_set_id]
+    sharing.sort(key=lambda a: (a.id != adventure.id, a.is_variant, a.id))
+    return next((a for a in sharing if is_unlocked(catalogue, account, a)), None)
+
+
+def _is_done(account: Account, adventure: Adventure) -> bool:
+    best = account.best_areas.get(adventure.id)
+    return adventure.id in account.completed_adventure_ids or (
+        adventure.objective_area is not None and best is not None and best >= adventure.objective_area
     )
