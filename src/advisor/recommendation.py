@@ -14,6 +14,7 @@ from advisor.account import Account
 from advisor.catalogue import Adventure, Catalogue, Champion, Feat, Patron, Restriction, SpecializationOption
 from advisor.champion_models import ChampionModels, Contribution, ModelStatus, Seat
 from advisor.formation_search import Candidate, SearchProblem, exhaustive_search, search
+from advisor.push_verdict import PushVerdict, push_verdict
 from advisor.restrictions import describe, failed
 
 RUN_GOAL_METRICS = {"Push": "Main DPS damage", "Gem Farm": "Main DPS damage", "Gold Farm": "Favor per hour"}
@@ -67,7 +68,7 @@ class FormationRecommendation:
     modron: object | None = None
     hints: tuple = ()
     comparisons: tuple = ()
-    push_verdict: object | None = None
+    push_verdict: PushVerdict | None = None  # Push only
 
 
 def recommend(
@@ -90,9 +91,10 @@ def recommend(
     )
 
     def infeasible(reason: str, left_out=()) -> FormationRecommendation:
+        verdict = push_verdict(catalogue, account, models, adventure, patron, (), None) if run_goal == "Push" else None
         return FormationRecommendation(
             adventure, run_goal, patron_obj, None, _empty_seats(adventure), None, label, None, False,
-            models.assumptions(run_goal), (), tuple(left_out), infeasible_reason=reason,
+            models.assumptions(run_goal), (), tuple(left_out), infeasible_reason=reason, push_verdict=verdict,
         )
 
     if not adventure.layout:
@@ -197,6 +199,10 @@ def recommend(
         catalogue.champion(i) for i in sorted(seated, key=lambda i: catalogue.champion(i).seat)
         if models.status(i) is not ModelStatus.VERIFIED
     )
+    verdict = (
+        push_verdict(catalogue, account, models, adventure, patron, result.seats, result.main_dps)
+        if run_goal == "Push" else None
+    )
     return FormationRecommendation(
         adventure=adventure,
         run_goal=run_goal,
@@ -207,9 +213,10 @@ def recommend(
         score_label=label,
         gap_pct=result.gap_pct,
         exact=result.exact,
-        scoring_assumptions=models.assumptions(run_goal),
+        scoring_assumptions=models.assumptions(run_goal) + (verdict.assumptions if verdict else ()),
         unverified_champions=unverified,
         left_out=tuple(sorted(left_out, key=lambda l: (l.champion.seat, l.champion.id))),
+        push_verdict=verdict,
     )
 
 

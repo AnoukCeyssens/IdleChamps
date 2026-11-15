@@ -182,6 +182,10 @@ def test_the_record_holds_account_totals_and_each_running_games_run(live):
     assert first["gems_earned"] == 161
     assert first["top_damage_champion_id"] == 153
     assert first["formation"] == [56, 158, 126, 163, 128, 153, 59, 149, 25, 43]
-    assert first["push_estimate"] is None  # no Push Verdict yet
+    assert first["push_estimate"]["objective"] == 50
     assert second["adventure_id"] == 9
     assert second["formation"] == [3, 1, 6, 7, 2, 5, 4, 13, -1]
+    # The Push estimate for the formation in play (worked out in test_push.py): Asharra's own run anchors it.
+    assert second["push_estimate"] == {
+        "expected_area": 85, "area": 84, "band": 34, "objective": 100, "verdict": "Borderline",
+    }

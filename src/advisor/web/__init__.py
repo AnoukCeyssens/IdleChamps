@@ -28,6 +28,7 @@ _TEMPLATES.env.filters["sci"] = lambda x: f"{x:,.0f}" if 100 <= x < 1e6 else f"{
 
 # Run Goals whose tab shows a Formation Recommendation so far (Push: #32, Gem Farm: #29).
 _RECOMMENDED_GOALS = ("Gold Farm",)
+_RECOMMENDED_GOALS += ("Push",)  # with its Push Verdict (#32)
 
 
 def create_app(log_path: Path | None = None, *, live: Refresher | None = None) -> FastAPI:
