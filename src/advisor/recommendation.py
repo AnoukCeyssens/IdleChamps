@@ -14,7 +14,7 @@ from advisor.account import Account
 from advisor.catalogue import Adventure, Catalogue, Champion, Feat, Patron, Restriction, SpecializationOption
 from advisor.champion_models import ChampionModels, Contribution, ModelStatus, Seat
 from advisor.formation_search import EXACT_TIME_LIMIT_S, Candidate, SearchProblem, exact_search, exhaustive_search, search
-from advisor.push_verdict import PushVerdict, push_verdict
+from advisor.push_verdict import PushVerdict, breaking_needs, push_verdict
 from advisor.restrictions import describe, failed
 
 RUN_GOAL_METRICS = {"Push": "Main DPS damage", "Gem Farm": "Main DPS damage", "Gold Farm": "Favor per hour"}
@@ -137,8 +137,10 @@ def recommend(
     dps = frozenset(c.champion_id for c in candidates if "dps" in catalogue.champion(c.champion_id).tags)
     problem = SearchProblem(usable, tuple(candidates), dps or frozenset(by_id))
 
+    needs = breaking_needs(catalogue, adventure, patron) if run_goal == "Push" else ()
+
     def scorer_for(main):
-        return models.scorer(adventure.layout, run_goal, main)
+        return models.scorer(adventure.layout, run_goal, main, breaking=needs)
 
     result = (exhaustive_search if solver == "exhaustive" else _fast(budget_s))(problem, scorer_for)
     exact_solve = None

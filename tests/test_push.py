@@ -91,7 +91,8 @@ def test_estimate_is_rounded_to_5_and_shows_its_band_and_objective(client):
 
 
 def test_likely_is_capped_at_borderline_while_monster_placement_is_unknown(client):
-    page = client.get(PUSH.format(9)).text  # far above objective 100
+    # Towering Expectations (objective 250): its Area Set 68 isn't in the recording.
+    page = client.get(PUSH.format(413)).text
 
     assert _one(page, "push-verdict") == "Borderline"
     assert rows(page, "push-cap")
@@ -231,7 +232,7 @@ def test_likely_when_placement_is_known_and_the_margin_beats_the_band(recorded):
     fresh = replace(account, best_areas={})
 
     known = push_verdict(catalogue, fresh, models, adventure, None, seats, main, placement_known=True)
-    unknown = push_verdict(catalogue, fresh, models, adventure, None, seats, main)
+    unknown = push_verdict(catalogue, fresh, models, adventure, None, seats, main, placement_known=False)
 
     assert known.label == "Likely" and not known.capped
     assert unknown.label == "Borderline" and unknown.capped

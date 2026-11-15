@@ -7,6 +7,7 @@ from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from advisor.area_sets import area_sets_from
 from advisor.request_log import RawResponses
 
 # The champion tags that describe a role, in the order the filter offers them.
@@ -43,6 +44,7 @@ class Champion:
     date_available: str = ""  # "YYYY-MM-DD hh:mm:ss"
     last_rework_date: str = ""
     base_attack_id: int | None = None
+    ultimate_attack_id: int | None = None
 
     @property
     def role_tags(self) -> tuple[str, ...]:
@@ -128,6 +130,10 @@ class Adventure:
     forced: tuple[ForcedChampion, ...] = ()
     # The adventure's own `game_changes` (modifiers), as sent; read by `advisor.push_verdict`.
     game_changes: tuple = field(default=(), hash=False, compare=False)
+    # Its Area Set (monster placement per area; known once the Area Set Cache holds it) and its
+    # unlock `requirements`, as sent.
+    area_set_id: int | None = None
+    requirements: tuple = field(default=(), hash=False, compare=False)
 
     @property
     def is_variant(self) -> bool:
@@ -204,6 +210,16 @@ class EffectDefinition:
 
 
 @dataclass(frozen=True)
+class Attack:
+    """An `attack_defines` row, reduced to what breaking reads (research/armoured-hits-based-monsters §3.1)."""
+
+    id: int
+    cooldown: float | None
+    hits_per_use: float = 1.0  # hits on one target per use: damage-over-time ticks × multi-hit fields
+    damage_modifier: float | None = None  # ultimates: damage per hit as a fraction of BUD
+
+
+@dataclass(frozen=True)
 class Catalogue:
     champions: tuple[Champion, ...]  # ordered by seat, then id
     campaigns: tuple[Campaign, ...] = ()
@@ -224,6 +240,11 @@ class Catalogue:
     health_curve: HealthCurve = CORE_HEALTH_CURVE
     # Attack cooldowns in seconds by attack id; only those whose attack definitions have been loaded.
     attack_cooldowns: Mapping[int, float] = field(default_factory=dict)
+    attacks: Mapping[int, Attack] = field(default_factory=dict)
+    # The Area Set Cache (#19): monster placement by `area_set_id`. In offline mode the sets in the
+    # log; in live mode every set any Refresh brought (see `advisor.area_sets`).
+    area_sets: Mapping = field(default_factory=dict)
+    game_version: str | None = None  # the newest changelog entry's version
 
     def upgrades_of(self, champion_id: int) -> tuple[Upgrade, ...]:
         return tuple(sorted((u for u in self.upgrades.values() if u.champion_id == champion_id), key=lambda u: u.id))
@@ -290,7 +311,28 @@ def parse_catalogue(raw: RawResponses) -> Catalogue:
         attack_cooldowns={
             int(a["id"]): float(a["cooldown"]) for a in _table(raw, "attack_defines") if _number(a.get("cooldown"))
         },
+        attacks={int(a["id"]): _attack(a) for a in _table(raw, "attack_defines") if "id" in a},
+        area_sets=area_sets_from(raw, game_version(raw)),
+        game_version=game_version(raw),
     )
+
+
+def game_version(raw: RawResponses) -> str | None:
+    """The newest changelog entry's version, e.g. "1.242.1 (v659)"."""
+    entries = [e for e in _table(raw, "changelog_defines") if e.get("version") and _number(e.get("id")) is not None]
+    return str(max(entries, key=lambda e: int(e["id"]))["version"]) if entries else None
+
+
+def _attack(define: dict) -> Attack:
+    ticks = 1.0
+    for time_key, interval_key in (("pool_time", "pool_interval"), ("line_time", "line_interval")):
+        t, i = _number(define.get(time_key)), _number(define.get(interval_key))
+        if t and i and i > 0:
+            ticks = max(ticks, t / i)
+    for key in ("unique_hit_multiplier", "projectile_multi_hits"):
+        if (n := _number(define.get(key))) and n > 1:
+            ticks *= n
+    return Attack(int(define["id"]), _number(define.get("cooldown")), ticks, _number(define.get("damage_modifier")))
 
 
 def _number(value) -> float | None:
@@ -450,6 +492,8 @@ def _adventure(
         restrictions=_restrictions(define.get("game_changes")),
         forced=_forced(define.get("game_changes")),
         game_changes=tuple(define.get("game_changes") or ()),
+        area_set_id=int(define["area_set_id"]) if define.get("area_set_id") is not None else None,
+        requirements=tuple(define.get("requirements") or ()),
     )
 
 
@@ -610,6 +654,7 @@ def _champion(hero: dict) -> Champion:
         date_available=str(hero.get("date_available") or ""),
         last_rework_date=str(hero.get("last_rework_date") or ""),
         base_attack_id=int(hero["base_attack_id"]) if hero.get("base_attack_id") else None,
+        ultimate_attack_id=int(hero["ultimate_attack_id"]) if hero.get("ultimate_attack_id") else None,
     )
 
 
