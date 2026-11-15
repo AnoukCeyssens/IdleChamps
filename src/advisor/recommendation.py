@@ -8,7 +8,7 @@ hints, comparisons, Push Verdict) are present and empty.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 from advisor.account import Account
 from advisor.catalogue import Adventure, Catalogue, Champion, Feat, Patron, Restriction, SpecializationOption
@@ -69,6 +69,9 @@ class FormationRecommendation:
     hints: tuple = ()
     comparisons: tuple = ()
     push_verdict: PushVerdict | None = None  # Push only
+    # The search this recommendation came from (candidates after restrictions), for one-change hints (#34).
+    # Derived search state: not persisted (see results_codec), rebuilt by `with_search_problem`.
+    problem: SearchProblem | None = field(default=None, compare=False, repr=False, metadata={"persist": False})
     # "Prove it's the best" (#31): None until run; "improved" (a better formation replaced the fast
     # one), "proven" (the shown formation is the best possible) or "timed_out" (gap_pct remains).
     exact_solve: str | None = None
@@ -111,31 +114,11 @@ def recommend(
     rules = [(r, None) for r in adventure.restrictions]
     rules += [(r, patron_obj.name) for r in patron_obj.restrictions] if patron_obj else []
     forced = {f.champion_id: f for f in adventure.forced if catalogue.find(f.champion_id)}
-    candidates, left_out, rejected_by = [], [], {}
-    for champion in catalogue.champions:
-        if champion.id in forced:
-            f = forced[champion.id]
-            slot = f.slot if f.slot is not None and f.slot not in adventure.blocked_slots else None
-            candidates.append(Candidate(champion.id, champion.seat, models.loadouts(champion.id), True, slot))
-            continue
-        if not account.owns(champion.id):
-            continue
-        broken = [(r, who) for r, who in rules if failed([r], champion, account.server_time)]
-        if broken:
-            rule, who = broken[0]
-            left_out.append(LeftOut(champion, f"not allowed{f' by {who}' if who else ''}: {describe(rule, names)}"))
-            for r, _ in broken:
-                rejected_by[r] = rejected_by.get(r, 0) + 1
-            continue
-        candidates.append(Candidate(champion.id, champion.seat, models.loadouts(champion.id)))
-
+    candidates, left_out, rejected_by = _candidates(catalogue, account, adventure, patron_obj, models)
     if not candidates:
         return infeasible(_missing_piece(rejected_by, rules, names), left_out)
-    # The search keeps the first of equally scored options: list higher levels first.
-    candidates.sort(key=lambda c: -_level(account, c.champion_id))
     by_id = {c.champion_id: c for c in candidates}
-    dps = frozenset(c.champion_id for c in candidates if "dps" in catalogue.champion(c.champion_id).tags)
-    problem = SearchProblem(usable, tuple(candidates), dps or frozenset(by_id))
+    problem = _search_problem(catalogue, usable, candidates)
 
     def scorer_for(main):
         return models.scorer(adventure.layout, run_goal, main)
@@ -225,9 +208,61 @@ def recommend(
         scoring_assumptions=models.assumptions(run_goal) + (verdict.assumptions if verdict else ()),
         unverified_champions=unverified,
         left_out=tuple(sorted(left_out, key=lambda l: (l.champion.seat, l.champion.id))),
+        problem=problem,
         exact_solve=exact_solve,
         push_verdict=verdict,
     )
+
+
+def with_search_problem(
+    catalogue: Catalogue, account: Account, rec: FormationRecommendation, *, models: ChampionModels | None = None
+) -> FormationRecommendation:
+    """`rec` with the search it came from, rebuilt when missing (results read back from the Store
+    don't persist it): the same candidates `recommend` searched, without searching again."""
+    if rec.problem is not None or rec.main_dps is None:
+        return rec
+    adventure = rec.adventure
+    usable = tuple(s for s in adventure.layout if s.index not in adventure.blocked_slots)
+    candidates, _, _ = _candidates(catalogue, account, adventure, rec.patron, models or ChampionModels(catalogue, account))
+    if not usable or not candidates:
+        return rec
+    return replace(rec, problem=_search_problem(catalogue, usable, candidates))
+
+
+def _candidates(
+    catalogue: Catalogue, account: Account, adventure: Adventure, patron_obj: Patron | None, models: ChampionModels
+) -> tuple[list[Candidate], list[LeftOut], dict[Restriction, int]]:
+    """The champions the search may seat (higher levels first), those the restrictions leave out,
+    and how many each restriction rejected."""
+    names = {c.id: c.name for c in catalogue.champions}
+    rules = [(r, None) for r in adventure.restrictions]
+    rules += [(r, patron_obj.name) for r in patron_obj.restrictions] if patron_obj else []
+    forced = {f.champion_id: f for f in adventure.forced if catalogue.find(f.champion_id)}
+    candidates, left_out, rejected_by = [], [], {}
+    for champion in catalogue.champions:
+        if champion.id in forced:
+            f = forced[champion.id]
+            slot = f.slot if f.slot is not None and f.slot not in adventure.blocked_slots else None
+            candidates.append(Candidate(champion.id, champion.seat, models.loadouts(champion.id), True, slot))
+            continue
+        if not account.owns(champion.id):
+            continue
+        broken = [(r, who) for r, who in rules if failed([r], champion, account.server_time)]
+        if broken:
+            rule, who = broken[0]
+            left_out.append(LeftOut(champion, f"not allowed{f' by {who}' if who else ''}: {describe(rule, names)}"))
+            for r, _ in broken:
+                rejected_by[r] = rejected_by.get(r, 0) + 1
+            continue
+        candidates.append(Candidate(champion.id, champion.seat, models.loadouts(champion.id)))
+    # The search keeps the first of equally scored options: list higher levels first.
+    candidates.sort(key=lambda c: -_level(account, c.champion_id))
+    return candidates, left_out, rejected_by
+
+
+def _search_problem(catalogue: Catalogue, usable: tuple, candidates: list[Candidate]) -> SearchProblem:
+    dps = frozenset(c.champion_id for c in candidates if "dps" in catalogue.champion(c.champion_id).tags)
+    return SearchProblem(usable, tuple(candidates), dps or frozenset(c.champion_id for c in candidates))
 
 
 def _level(account: Account, champion_id: int) -> int:

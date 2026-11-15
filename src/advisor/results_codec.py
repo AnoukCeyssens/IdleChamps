@@ -3,8 +3,9 @@
 Generic over the advisor's frozen dataclasses and enums, so fields later tickets add are written
 without changes here. Catalogue entities (champions, adventures, patrons, feats) are written as
 references by id and read back from the Catalogue the results were computed on (same definitions
-checksum); anything the Catalogue doesn't hold as-is is written by value. Only classes from the
-`advisor` package are ever constructed when reading.
+checksum); anything the Catalogue doesn't hold as-is is written by value. Fields marked
+`metadata={"persist": False}` (derived state, e.g. a recommendation's search problem) are left out
+and read back as their default. Only classes from the `advisor` package are ever constructed when reading.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ class Encoder:
             index = self._index.get(type(value))
             if index is not None and index.get(getattr(value, "id", None)) == value:
                 return {"$ref": type(value).__name__, "id": value.id}
-            fields = {f.name: self(getattr(value, f.name)) for f in dataclasses.fields(value) if f.init}
+            fields = {f.name: self(getattr(value, f.name)) for f in dataclasses.fields(value) if f.init and f.metadata.get("persist", True)}
             return {"$dc": _name(type(value)), "fields": fields}
         if isinstance(value, (tuple, list)):
             return [self(v) for v in value]

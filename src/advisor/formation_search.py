@@ -422,3 +422,14 @@ def _max_assignment(weights: list[list[float]]) -> list[int]:
         if p[j]:
             result[p[j] - 1] = j - 1
     return result
+
+
+def plan_bounds(problem: SearchProblem, scorer_for: ScorerFor) -> dict[Seat, float]:
+    """The assignment bound of every feasible Main DPS seat: no formation built around that seat
+    scores above it (log). The cheap first step of `search`, used alone to prune one-change hints."""
+    bounds = {}
+    for main in _main_seats(problem):
+        plan = _assign(problem, main, scorer_for(main))
+        if plan is not None:
+            bounds[main] = plan[0]
+    return bounds
