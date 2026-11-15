@@ -12,7 +12,9 @@ Python 3.13+ via `uv` (FastAPI + Jinja + htmx, no JS build step). Code lives in 
 
 Test seam (spec #22): drive the app through the `client` fixture in `tests/conftest.py` (FastAPI `TestClient` over `create_app(FIXTURE_LOG)`) and assert on what the page shows. Mark repeated things in templates with `data-row="<kind>"` and read them with `rows(page, kind)`. Expected values come from the real fixture data (e.g. 168 champions, Bruenor at level 300), not from re-running the parser.
 
-Layout: `game_client.py` (offline client, read-only call allow-list), `request_log.py` (log format, credential stripping), `catalogue.py` / `account.py` (typed domain objects parsed from raw responses), `web/` (`create_app`, templates; display only), `cli.py`, `fixtures.py`.
+Responses missing from the recording (`getcampaigndetails`, `getcompletiondata`) live in the small hand-built `tests/fixtures/progress.log`; `tests/test_explorer.py` merges it over the recording (`read_responses(a) | read_responses(b)` → `write_responses`).
+
+Layout: `game_client.py` (offline client, read-only call allow-list), `request_log.py` (log format, credential stripping), `catalogue.py` / `account.py` (typed domain objects parsed from raw responses), `explorer.py` (Formation view tree and completion badges), `web/` (`create_app`, templates; display only), `cli.py`, `fixtures.py`.
 
 ## Agent skills
 
