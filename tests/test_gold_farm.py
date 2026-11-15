@@ -101,7 +101,8 @@ def test_scoring_assumptions_include_click_and_daily_cap_ones(modelled):
 def test_unverified_champions_are_badged(modelled):
     page = modelled.get(GOLD.format(7)).text
 
-    assert _one(page, "unverified-badge") == "9 champions unverified, score may be off"
+    # Kas (reconstructed, Stale until a live damage check); Not Modelled champions aren't unverified.
+    assert _one(page, "unverified-badge") == "1 champion unverified, score may be off"
 
 
 def test_left_out_lists_owned_champions_not_seated_with_reasons(modelled):

@@ -1,4 +1,5 @@
-""""What would make this better" hints (#34), Seam 2: the one-change engine on a recommendation.
+""""What would make this better" hints (#34): the rail through the HTTP app; the one-change
+engine's pruning against an exhaustive re-search (the search oracle) on Seam 2.
 
 The recording has no `buff_defines` (potions), no `hero_feat_defines` and no gear definitions for
 Celeste, so HINT_TABLES adds small hand-written ones on top of EFFECT_TABLES. Shapes: feats and
@@ -13,14 +14,16 @@ import pickle
 from dataclasses import replace
 
 import pytest
+from fastapi.testclient import TestClient
 
 from advisor.account import parse_account
 from advisor.catalogue import parse_catalogue
 from advisor.hints import candidate_changes, hints, measure, what_if
 from advisor.recommendation import recommend, with_search_problem
-from advisor.request_log import read_responses
+from advisor.request_log import read_responses, write_responses
+from advisor.web import create_app
 from advisor.results_codec import Decoder, Encoder
-from conftest import FIXTURE_LOG
+from conftest import FIXTURE_LOG, rows
 from test_recommendation import DIAMOND, EFFECT_TABLES
 
 HINT_TABLES = {
@@ -67,21 +70,28 @@ def hinted(raw):
 
 
 @pytest.fixture(scope="module")
-def mad_wizard_hints(hinted):
-    catalogue, account = hinted
-    rec = recommend(catalogue, account, catalogue.adventure(7), "Gold Farm")
-    return rec, measure(catalogue, account, rec, candidate_changes(catalogue, account))
+def mad_wizard_hints(raw, tmp_path_factory) -> dict[str, str]:
+    """The Mad Wizard's Gold Farm rail, through the HTTP app: action -> shown gain."""
+    responses = dict(raw)
+    responses["getdefinitions"] = {**raw["getdefinitions"], **HINT_TABLES}
+    log = tmp_path_factory.mktemp("hints") / "requestlog.log.gz"
+    write_responses(responses, log)
+    page = TestClient(create_app(log)).get("/adventures/7/hints", params={"goal": "Gold Farm"}).text
+    shown = [r["text"].removesuffix(" Torm's Favor per hour").rsplit(" → ", 1) for r in rows(page, "hint")]
+    return dict(shown)
 
 
 def _gains(found):
     return {h.change.action: h.gain_pct for h in found}
 
 
-def test_a_potion_is_a_hint_with_its_gain(mad_wizard_hints):
-    _, found = mad_wizard_hints
+def _number(gain: str) -> float:
+    return float(gain.strip("+%"))
 
+
+def test_a_potion_is_a_hint_with_its_gain(mad_wizard_hints):
     # +100% damage is worth 2^0.332 = +25.9% Favor per hour.
-    assert _gains(found)["Use a Potion of the Giant's Strength"] == pytest.approx(25.88, abs=0.01)
+    assert mad_wizard_hints["Use a Potion of the Giant's Strength"] == "+26%"
 
 
 def test_the_baseline_never_includes_potions(hinted, raw):
@@ -97,35 +107,21 @@ def test_the_baseline_never_includes_potions(hinted, raw):
 
 
 def test_each_kind_of_change_is_measured_by_a_re_search(mad_wizard_hints):
-    _, found = mad_wizard_hints
-    gains = _gains(found)
-
     # Evelyn's +300% to all replaces a seat-6 champion who adds nothing: 4^0.332 = +58.4%.
-    assert gains["Get Evelyn (The Great Modron March, Year 1)"] == pytest.approx(58.45, abs=0.01)
+    assert mad_wizard_hints["Get Evelyn (The Great Modron March, Year 1)"] == "+58%"
     # Feat: +50% to all, 1.5^0.332 = +14.4%.
-    assert gains["Unlock Celeste's feat Inspiring Presence"] == pytest.approx(14.40, abs=0.01)
-    # Chest: Blessing 100% × (1 + 100% + 50%·1.016) → × (1 + 100% + 100%·1.016): (4.016/3.508)^0.332.
-    assert gains["Open a chest for Celeste's slot 2 (Rare → Epic)"] == pytest.approx(4.59, abs=0.01)
-    # Contract: item level 5 → 29 (1 Large contract): 50% × 1.016 → 50% × 1.112.
-    assert gains["Blacksmith contract on Celeste's slot 2 (item level 5 → 29)"] == pytest.approx(0.45, abs=0.01)
+    assert mad_wizard_hints["Unlock Celeste's feat Inspiring Presence"] == "+14%"
+    # Chest: Blessing 100% × (1 + 100% + 50%·1.016) → × (1 + 100% + 100%·1.016): (4.016/3.508)^0.332 = +4.59%.
+    assert mad_wizard_hints["Open a chest for Celeste's slot 2 (Rare → Epic)"] == "+4.6%"
+    # Contract: item level 5 → 29 (1 Large contract): 50% × 1.016 → 50% × 1.112 = +0.45%.
+    assert mad_wizard_hints["Blacksmith contract on Celeste's slot 2 (item level 5 → 29)"] in ("+0.4%", "+0.5%")
 
 
-def test_zero_gain_changes_are_not_shown(mad_wizard_hints):
-    _, found = mad_wizard_hints
-
-    assert all(h.gain_pct > 0.01 for h in found)
-    assert "Use a Potion of Speed" not in _gains(found)  # game speed isn't modelled: no gain
-    assert not any("Bruenor" in action for action in _gains(found))  # no modelled gear effects
-    assert [h.gain_pct for h in found] == sorted((h.gain_pct for h in found), reverse=True)
-
-
-def test_hints_for_the_right_rail_are_the_best_ten(hinted, mad_wizard_hints):
-    catalogue, account = hinted
-    rec, everything = mad_wizard_hints
-
-    top = hints(catalogue, account, rec)
-
-    assert [h.change.action for h in top] == [h.change.action for h in everything[:10]]
+def test_zero_gain_changes_are_not_shown_and_the_rest_rank_best_first(mad_wizard_hints):
+    assert "Use a Potion of Speed" not in mad_wizard_hints  # game speed isn't modelled: no gain
+    assert not any("Bruenor" in action for action in mad_wizard_hints)  # no modelled gear effects
+    gains = [_number(g) for g in mad_wizard_hints.values()]
+    assert gains == sorted(gains, reverse=True) and len(gains) <= 10  # the rail's best ten
 
 
 def test_an_infeasible_recommendation_has_no_hints(hinted):

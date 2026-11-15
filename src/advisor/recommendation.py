@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from advisor.account import Account
 from advisor.catalogue import Adventure, Catalogue, Champion, Feat, Patron, Restriction, SpecializationOption
 from advisor.comparisons import Comparison, compare, given_formations
-from advisor.champion_models import BREAK_TIME_S, ChampionModels, Contribution, ModelStatus, Seat
+from advisor.champion_models import BREAK_TIME_S, ChampionModels, Contribution, Loadout, ModelStatus, Seat
 from advisor.formation_search import EXACT_TIME_LIMIT_S, Candidate, SearchProblem, exact_search, exhaustive_search, search
 from advisor.push_verdict import PushVerdict, breaking_needs, push_verdict
 from advisor.restrictions import describe, failed
@@ -257,7 +257,7 @@ def recommend(
 
     unverified = tuple(
         catalogue.champion(i) for i in sorted(seated, key=lambda i: catalogue.champion(i).seat)
-        if models.status(i) is not ModelStatus.VERIFIED
+        if models.status(i).unverified
     )
     verdict = (
         push_verdict(catalogue, account, models, adventure, patron, result.seats, result.main_dps)
@@ -283,6 +283,29 @@ def recommend(
         push_verdict=verdict,
         comparisons=compare(catalogue, models, run_goal, given, problem, scorer_for, result),
     )
+
+
+def with_current_verdict(
+    catalogue: Catalogue, account: Account, rec: FormationRecommendation, *, models: ChampionModels | None = None
+) -> FormationRecommendation:
+    """`rec` with its Push Verdict made for the account as it is now. The verdict reads the live runs
+    (its Anchor Run), which aren't part of the recommendation key, so a stored recommendation may
+    predate them: the formation is kept and only the verdict (and its Scoring Assumptions) is redone."""
+    if rec.run_goal != "Push":
+        return rec
+    models = models or ChampionModels(catalogue, account)
+    placed = [
+        (Seat(s.champion.id, s.slot, Loadout(tuple(o.id for o in s.specializations), tuple(f.id for f in s.feats))), s)
+        for s in rec.seats if s.champion is not None
+    ]
+    seats = tuple(seat for seat, _ in placed)
+    main = next((seat for seat, shown in placed if shown.is_main_dps), None) if rec.main_dps else None
+    verdict = push_verdict(catalogue, account, models, rec.adventure, rec.patron.id if rec.patron else None, seats, main)
+    kept = rec.scoring_assumptions
+    old = rec.push_verdict.assumptions if rec.push_verdict else ()
+    if old and kept[-len(old):] == old:
+        kept = kept[:-len(old)]
+    return replace(rec, push_verdict=verdict, scoring_assumptions=kept + verdict.assumptions)
 
 
 def with_search_problem(

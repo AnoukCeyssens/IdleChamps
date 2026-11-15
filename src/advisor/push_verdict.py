@@ -208,7 +208,7 @@ def _estimate(catalogue, account, models, adventure, patron, formation, main_dps
     expected = int(5 * round(area / 5))
 
     ids = {s.champion_id for s in formation} | {s.champion_id for s in anchor_seats} | {main.id}
-    unverified = sum(1 for i in ids if models.status(i) is not ModelStatus.VERIFIED)
+    unverified = sum(1 for i in ids if models.status(i).unverified)
     band = band_width(campaign.is_event, anchor.same_main_dps, unverified)
 
     capped = False
@@ -238,7 +238,8 @@ def _estimate(catalogue, account, models, adventure, patron, formation, main_dps
         f"Band ±{band} areas: {BAND_EVENT if campaign.is_event else BAND_CORE} on "
         f"{'event' if campaign.is_event else 'core'} campaigns"
         + ("" if anchor.same_main_dps else f", +{BAND_OTHER_MAIN_DPS} for the anchor's different Main DPS")
-        + (f", +{BAND_PER_UNVERIFIED} for each of {unverified} unverified champions" if unverified else "")
+        + (f", +{BAND_PER_UNVERIFIED} for each of {unverified} unverified champion{'s' if unverified > 1 else ''}"
+           if unverified else "")
         + ".",
     ]
     if not placement_known:

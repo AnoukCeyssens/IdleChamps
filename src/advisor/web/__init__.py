@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
-from dataclasses import replace
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,29 +14,20 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from advisor.account import Account, parse_account
-from advisor.area_sets import merge as merge_area_sets
-from advisor.catalogue import GEAR_SLOTS, ROLE_TAGS, Catalogue, parse_catalogue
-from advisor import model_status
-from advisor.champion_models import ChampionModels, ModelStatus
-from advisor.champion_usage import champion_steps, seated_in
+from advisor.background import ExecutorFactory, Workers, process_pool
+from advisor.catalogue import GEAR_SLOTS, ROLE_TAGS
+from advisor.champion_models import ModelStatus
 from advisor.explorer import RUN_GOALS, adventure_node, is_running, tree
-from advisor.hints import hints as one_change_hints
 from advisor.history import write_history
-from advisor.next_steps import NEXT_STEP_GOALS, TOP_STEPS, FocusSets, Steps, measure_adventure, next_steps
-from advisor.next_steps import ready_to_complete
+from advisor.next_steps import NEXT_STEP_GOALS, TOP_STEPS, FocusSets, Steps
 from advisor.game_client import DEFAULT_LOG, HttpTransport, LiveGameClient, OfflineGameClient, Transport
-from advisor.recommendation import recommend, with_search_problem
-from advisor.recompute import ExecutorFactory, Recompute, process_pool
+from advisor.recompute import Recompute
 from advisor.refresh import Refresher
-from advisor.request_log import RawResponses
+from advisor.session import RECOMMENDED_GOALS, Session
 from advisor.store import Store, load_config
 
 _TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
 _TEMPLATES.env.filters["sci"] = lambda x: f"{x:,.0f}" if 100 <= x < 1e6 else f"{x:.3g}" if x < 100 else f"{x:.2e}".replace("e+", "e")
-
-# Run Goals whose tab shows a Formation Recommendation.
-_RECOMMENDED_GOALS = ("Gem Farm", "Gold Farm", "Push")  # Push with its Push Verdict (#32)
 
 
 def create_app(
@@ -50,60 +40,22 @@ def create_app(
     store: Store | None = None,
 ) -> FastAPI:
     """The advisor, either in offline mode on a request log (the game's or a fixture), or
-    live: showing the Store's cached data and refreshing it from the game servers.
-    `recompute` holds the Formation Recommendations (precomputed after each Refresh in live
-    mode); by default they are computed on demand when a tab is opened. With a `store`, the Area
-    Set Cache there takes in every set the responses bring and serves all it holds."""
-    raw: RawResponses = OfflineGameClient(log_path).fetch() if live is None else live.responses()
-    catalogue, account = Catalogue(champions=()), Account(champions={})
-    models = ChampionModels(catalogue, account)
-    results = recompute or Recompute(_RECOMMENDED_GOALS)
-    hints: dict[tuple, tuple] = {}  # "What would make this better", computed when a recommendation is opened
-    ledger = model_status.from_json(store.load_model_status()) if store is not None else model_status.Ledger()
-    checks: tuple[model_status.DamageCheck, ...] = ()  # the live damage checks on the shown snapshot
-    calibration: tuple[model_status.CalibrationFlag, ...] = ()  # Push calibration flags on it (#39)
-    focus =focus or FocusSets()  # Next Steps' Focus Sets (#35)
-    steps = steps or Steps()  # each Focus adventure's measured one-changes
-
-    def load(responses: RawResponses, *, refreshed: bool = True) -> None:
-        """(Re)build everything the pages show from raw responses (at start and after a Refresh)."""
-        nonlocal raw, catalogue, account, models, ledger, checks, calibration
-        if "getdefinitions" not in responses or "getuserdetails" not in responses:
-            return  # live mode before the first Refresh: nothing to show yet
-        raw = responses
-        catalogue = parse_catalogue(raw)
-        if store is not None:
-            cache = merge_area_sets(store.load_area_sets(), catalogue.area_sets)
-            store.save_area_sets(cache)
-            catalogue = replace(catalogue, area_sets=cache)
-        account = parse_account(raw)
-        checks = model_status.damage_checks(catalogue, account, ChampionModels(catalogue, account))
-        ledger = model_status.advance(ledger, catalogue, account, checks)
-        if store is not None:
-            try:
-                store.save_model_status(model_status.to_json(ledger))
-            except OSError:
-                pass  # kept in memory; the next Refresh saves it
-        models = ChampionModels(catalogue, account, statuses=ledger.statuses())
-        calibration = model_status.push_calibration(catalogue, account, models)
-        results.update(raw, catalogue, account, models, precompute=refreshed)
-        hints.clear()
-        steps.update(raw, account, catalogue, models)  # with the Area Set Cache and Model Statuses (#36)
-        steps.ensure((a, g) for g in NEXT_STEP_GOALS for a in focus.get(catalogue, account, g))
-
-    load(raw, refreshed=False)
+    live: showing the Store's cached data and refreshing it from the game servers. What the
+    pages show comes from a `Session` (`advisor.session`); this module only renders it."""
+    session = Session(results=recompute, focus=focus, steps=steps, store=store)
+    session.load(OfflineGameClient(log_path).fetch() if live is None else live.responses(), refreshed=False)
     app = FastAPI(
         title="Idle Champions Advisor",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        lifespan=_refresh_on_start(live, results, steps) if live else None,
+        lifespan=_refresh_on_start(live, session) if live else None,
     )
     if live is None:
         app.state.header = lambda: {"mode": "offline"}
     else:
-        live.on_refresh(load)
-        _add_refresh(app, live, results)
+        live.on_refresh(session.load)
+        _add_refresh(app, live, session.results)
 
     @app.get("/")
     def home() -> RedirectResponse:
@@ -113,11 +65,12 @@ def create_app(
     def champions(request: Request, role: str | None = None, status: str | None = None) -> HTMLResponse:
         role = role if role in ROLE_TAGS else None
         status = status if status in _STATUS_NAMES else None
+        models = session.models
         shown = [
-            c for c in catalogue.champions
+            c for c in session.catalogue.champions
             if (role is None or role in c.tags) and (status is None or models.status(c.id).value == status)
         ]
-        rows = [{"champion": c, "owned": account.champions.get(c.id), "status": models.status(c.id)} for c in shown]
+        rows = [{"champion": c, "owned": session.account.champions.get(c.id), "status": models.status(c.id)} for c in shown]
         template = "_champion_rows.html" if request.headers.get("HX-Request") else "champions.html"
         return _TEMPLATES.TemplateResponse(
             request, template,
@@ -126,28 +79,14 @@ def create_app(
 
     @app.get("/model-status", response_class=HTMLResponse)
     def model_status_page(request: Request) -> HTMLResponse:
-        table = [{"champion": c, "status": models.status(c.id)} for c in catalogue.champions]
-        with_sets = [a for a in catalogue.adventures if a.area_set_id is not None]
-        known = [a for a in with_sets if a.area_set_id in catalogue.area_sets]
-        coverage = (
-            f"Monster placement known for {len(known)} of {len(with_sets)} adventures "
-            f"({len({a.area_set_id for a in known})} of {len({a.area_set_id for a in with_sets})} area sets)"
-        )
-        if store is None:
-            history = "History: not recorded in offline mode"
-        else:
-            kept = store.load_history()
-            first = next((r.get("server_time") for r in kept if r.get("server_time")), None)
-            history = f"History: {len(kept)} record{'' if len(kept) == 1 else 's'}" + (
-                f" since {_date(first)}" if first else ""
-            )
+        overview = session.model_status_overview()
         context = {
-            "table": table,
-            "flags": ledger.open_flags() + model_status.community_flags(results.held()),
-            "calibration": calibration,
-            "checks": checks,
-            "coverage": coverage,
-            "history": history,
+            "table": overview.table,
+            "flags": overview.flags,
+            "calibration": overview.calibration,
+            "checks": overview.checks,
+            "coverage": overview.coverage,
+            "history": overview.history,
             "data_folder": str(store.folder) if store is not None else None,
             "opened": request.query_params.get("opened") == "1",
         }
@@ -162,9 +101,15 @@ def create_app(
             open_folder(store.folder)
             return RedirectResponse("/model-status?opened=1", status_code=303)
 
+    def _adventure(adventure_id: int):
+        found = session.catalogue.adventure(adventure_id)
+        if found is None:
+            raise HTTPException(404, "No such adventure")
+        return found
+
     @app.get("/adventures")
     def adventures() -> RedirectResponse:
-        campaigns = tree(catalogue, account)
+        campaigns = tree(session.catalogue, session.account)
         if not campaigns:  # live mode before the first Refresh
             return RedirectResponse("/champions")
         first = campaigns[0].adventures[0].adventure
@@ -174,12 +119,11 @@ def create_app(
     def adventure(
         request: Request, adventure_id: int, goal: str = RUN_GOALS[0], patron: int | None = None
     ) -> HTMLResponse:
-        found = catalogue.adventure(adventure_id)
-        if found is None:
-            raise HTTPException(404, "No such adventure")
+        found = _adventure(adventure_id)
         goal = goal if goal in RUN_GOALS else RUN_GOALS[0]
         patron = patron if patron in found.patron_objectives else None
-        recommendation, stale = results.get(found, goal, patron) if goal in _RECOMMENDED_GOALS else (None, False)
+        catalogue, account = session.catalogue, session.account
+        recommendation, stale = session.recommendation(found, goal, patron)
         context = {
             "tree": tree(catalogue, account),
             "node": adventure_node(catalogue, account, found),
@@ -190,7 +134,7 @@ def create_app(
             "patron": patron,
             "recommendation": recommendation,
             "stale": stale,  # from before the running recompute
-            "focus_goals": [(g, found.id in focus.get(catalogue, account, g)) for g in NEXT_STEP_GOALS],
+            "focus_goals": [(g, session.is_focus(found, g)) for g in NEXT_STEP_GOALS],
             "patrons": [
                 {"patron": catalogue.patron(pid), "area": area, "locked": pid not in account.unlocked_patron_ids}
                 for pid, area in found.patron_objectives.items()
@@ -203,36 +147,18 @@ def create_app(
         request: Request, adventure_id: int, goal: str = RUN_GOALS[0], patron: int | None = None
     ) -> HTMLResponse:
         """The right rail's hints, loaded by the Formation view once the recommendation is shown."""
-        found = catalogue.adventure(adventure_id)
-        if found is None:
-            raise HTTPException(404, "No such adventure")
+        found = _adventure(adventure_id)
         patron = patron if patron in found.patron_objectives else None
-        rec, stale = results.get(found, goal, patron) if goal in _RECOMMENDED_GOALS else (None, False)
-        key = (found.id, goal, patron)
-        shown = hints.get(key, ())
-        if rec is not None and key not in hints:
-            rec = with_search_problem(catalogue, account, rec, models=models)  # persisted results carry none
-            shown = one_change_hints(catalogue, account, rec, models=models)
-            if not stale:  # a stale result is replaced once the recompute reaches it
-                hints[key] = shown
-        metric = rec.score_label.removesuffix(" (relative)") if rec else ""
+        shown, metric = session.rail_hints(found, goal, patron)
         return _TEMPLATES.TemplateResponse(request, "_hints.html", {"hints": shown, "metric": metric})
 
     @app.post("/adventures/{adventure_id}/prove")
     def prove(adventure_id: int, goal: str = RUN_GOALS[0], patron: int | None = None) -> RedirectResponse:
-        """"Prove it's the best" (#31): the exact solve (~60 s) replaces the cached recommendation;
-        it keeps the fast formation unless it finds a better one."""
-        found = catalogue.adventure(adventure_id)
-        if found is None:
-            raise HTTPException(404, "No such adventure")
+        """"Prove it's the best" (#31)."""
+        found = _adventure(adventure_id)
         goal = goal if goal in RUN_GOALS else RUN_GOALS[0]
         patron = patron if patron in found.patron_objectives else None
-        if goal in _RECOMMENDED_GOALS:
-            proven = recommend(catalogue, account, found, goal, patron, models=models, solver="exact")
-            results.put(found, goal, patron, proven)
-            hints.pop((found.id, goal, patron), None)  # gains are measured against the shown formation
-            if patron is None:
-                steps.drop(found.id, goal)
+        session.prove(found, goal, patron)
         query = f"goal={quote(goal)}" + (f"&patron={patron}" if patron is not None else "")
         return RedirectResponse(f"/adventures/{found.id}?{query}", status_code=303)
 
@@ -240,80 +166,55 @@ def create_app(
     def pin_focus(request: Request, adventure_id: int, goal: str, pin: bool = True) -> RedirectResponse:
         """Pin an adventure to a Run Goal's Focus Set, or unpin it (from the adventure header or
         the Next Steps tab)."""
-        found = catalogue.adventure(adventure_id)
+        found = session.catalogue.adventure(adventure_id)
         if found is None or goal not in NEXT_STEP_GOALS:
             raise HTTPException(404, "No such adventure or Next Steps tab")
-        focus.pin(catalogue, account, goal, found.id, pin)
-        steps.ensure([(found.id, goal)] if pin else [])
+        session.pin(found, goal, pin)
         back = urlsplit(request.headers.get("referer") or f"/adventures/{found.id}")
         return RedirectResponse((back.path or "/") + (f"?{back.query}" if back.query else ""), status_code=303)
 
     @app.get("/next-steps", response_class=HTMLResponse)
     def next_steps_page(request: Request, goal: str = NEXT_STEP_GOALS[0], all: bool = False) -> HTMLResponse:
         goal = goal if goal in NEXT_STEP_GOALS else NEXT_STEP_GOALS[0]
-        adventures = [a for i in focus.get(catalogue, account, goal) if (a := catalogue.adventure(i))]
         context = {
             "goal": goal,
             "goals": NEXT_STEP_GOALS,
             "all": all,
-            "focus": [{"adventure": a, "running": is_running(catalogue, account, a)} for a in adventures],
+            "focus": [
+                {"adventure": a, "running": is_running(session.catalogue, session.account, a)}
+                for a in session.focus_adventures(goal)
+            ],
         }
         return _TEMPLATES.TemplateResponse(request, "next_steps.html", context)
-
-    def _ranked_steps(goal: str) -> tuple[tuple, int, int]:
-        """(the Run Goal's ranked Next Steps, Focus adventures still measuring in the background,
-        Focus Set size). Steps come from the steps cache (background-measured in live mode, with
-        the Area Set Cache and Model Statuses); what's missing is measured on demand. Shared by the
-        Next Steps tab and the champion page (#37)."""
-        adventures = [a for i in focus.get(catalogue, account, goal) if (a := catalogue.adventure(i))]
-        steps.ensure((a.id, goal) for a in adventures)
-        measured, waiting = {}, 0
-        for adventure in adventures:
-            found = steps.get(adventure.id, goal)
-            if found is None and steps.pending(adventure.id, goal):
-                waiting += 1
-                continue
-            if found is None:
-                rec, stale = results.get(adventure, goal)
-                found = measure_adventure(catalogue, account, rec, models=models)
-                if not stale:
-                    steps.put(adventure.id, goal, found)
-            measured[adventure.id] = found
-        ranked = () if waiting else next_steps(catalogue, account, adventures, measured)
-        return ranked, waiting, len(adventures)
 
     @app.get("/next-steps/steps", response_class=HTMLResponse)
     def next_steps_list(request: Request, goal: str = NEXT_STEP_GOALS[0], all: bool = False) -> HTMLResponse:
         """The ranked steps, loaded by the Next Steps tab; measured in the background in live mode,
         on demand otherwise."""
         goal = goal if goal in NEXT_STEP_GOALS else NEXT_STEP_GOALS[0]
-        ranked, waiting, focus_count = _ranked_steps(goal)
+        ranked = session.ranked_steps(goal)
         context = {
             "goal": goal,
             "all": all,
-            "waiting": waiting,
-            "focus_count": focus_count,
-            "steps": ranked if all else ranked[:TOP_STEPS],
-            "total": len(ranked),
+            "waiting": ranked.waiting,
+            "focus_count": ranked.focus_count,
+            "steps": ranked.steps if all else ranked.steps[:TOP_STEPS],
+            "total": len(ranked.steps),
         }
         return _TEMPLATES.TemplateResponse(request, "_next_steps.html", context)
 
     @app.get("/next-steps/ready", response_class=HTMLResponse)
     def ready_list(request: Request) -> HTMLResponse:
         """Push's Ready to complete block, loaded by the Push tab (#36)."""
-
-        def verdict_for(adventure, patron):
-            return results.get(adventure, "Push", patron)[0].push_verdict
-
-        ready = ready_to_complete(catalogue, account, verdict_for)
-        return _TEMPLATES.TemplateResponse(request, "_ready.html", {"ready": ready})
+        return _TEMPLATES.TemplateResponse(request, "_ready.html", {"ready": session.ready()})
 
     @app.get("/champions/{champion_id}", response_class=HTMLResponse)
     def champion_detail(request: Request, champion_id: int) -> HTMLResponse:
+        catalogue = session.catalogue
         champion = catalogue.find(champion_id)
         if champion is None:
             raise HTTPException(status_code=404, detail="No such champion")
-        owned = account.champions.get(champion_id)
+        owned = session.account.champions.get(champion_id)
         gear = []
         for slot in GEAR_SLOTS:
             held = owned.gear.get(slot) if owned else None
@@ -337,33 +238,21 @@ def create_app(
                 "gear": gear,
                 "feats": feats,
                 "spec_choices": catalogue.specializations.get(champion_id, ()),
-                "model_status": models.status(champion_id),
-                "model_evidence": _evidence(models, ledger, champion_id),
-                **_champion_usage_context(champion_id),  # how the advisor uses it (#37)
+                "model_status": session.models.status(champion_id),
+                "model_evidence": session.evidence(champion_id),
+                "step_goals": NEXT_STEP_GOALS,
+                **session.champion_usage(champion_id),  # how the advisor uses it (#37)
             },
         )
-
-    # --- champion page: how the advisor uses it (#37) ------------------------------------------
-
-    def _champion_usage_context(champion_id: int) -> dict:
-        explanation = models.explain(champion_id)
-        held = results.available()
-        return {
-            "explanation": explanation,
-            "seated": seated_in(champion_id, held, explanation),
-            "computed": sum(1 for rec, _ in held if rec.patron is None),
-            "computable": len(catalogue.adventures) * len(_RECOMMENDED_GOALS),
-            "step_goals": NEXT_STEP_GOALS,
-        }
 
     @app.get("/champions/{champion_id}/next-steps", response_class=HTMLResponse)
     def champion_next_steps(request: Request, champion_id: int, goal: str = NEXT_STEP_GOALS[0]) -> HTMLResponse:
         """One Run Goal's Next Steps that involve this champion, loaded by its page."""
-        champion = catalogue.find(champion_id)
+        champion = session.catalogue.find(champion_id)
         if champion is None or goal not in NEXT_STEP_GOALS:
             raise HTTPException(404, "No such champion or Next Steps tab")
-        ranked, waiting, _ = _ranked_steps(goal)
-        context = {"champion": champion, "goal": goal, "waiting": waiting, "steps": champion_steps(champion_id, ranked)}
+        steps, waiting = session.champion_steps(champion_id, goal)
+        context = {"champion": champion, "goal": goal, "waiting": waiting, "steps": steps}
         return _TEMPLATES.TemplateResponse(request, "_champion_steps.html", context)
 
     return app
@@ -377,9 +266,9 @@ def create_live_app(
     sleep: Callable[[float], None] = time.sleep,
     background: Callable | None = None,
     executor: ExecutorFactory = process_pool,
-    steps_executor: ExecutorFactory = process_pool,
 ) -> FastAPI:
-    """The advisor in live mode on an app data folder (config, caches)."""
+    """The advisor in live mode on an app data folder (config, caches). `executor` makes the one
+    background pool the Recompute and Next Steps share."""
     config = load_config(data_dir, DEFAULT_LOG)
     client = LiveGameClient(
         transport or HttpTransport(), config.request_log, clock=clock or time.monotonic, sleep=sleep
@@ -388,22 +277,23 @@ def create_live_app(
     store = Store(data_dir)
     refresher = Refresher(client, store, cooldown=config.cooldown_seconds, clock=clock or time.time, **options)
     refresher.on_refresh(lambda responses: write_history(store, responses))
+    workers = Workers(executor)
     return create_app(
         live=refresher,
-        recompute=Recompute(_RECOMMENDED_GOALS, store=store, executor=executor),
+        recompute=Recompute(RECOMMENDED_GOALS, store=store, workers=workers),
         store=store,
         focus=FocusSets(store),
-        steps=Steps(steps_executor),  # Next Steps' Focus adventures, measured in the background
+        steps=Steps(workers),  # Next Steps' Focus adventures, measured in the same background pool
     )
 
 
-def _refresh_on_start(live: Refresher, results: Recompute, steps: Steps):
+def _refresh_on_start(live: Refresher, session: Session):
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         live.start()
         yield
-        results.close()
-        steps.close()
+        session.results.close()
+        session.steps.close()
 
     return lifespan
 
@@ -444,27 +334,6 @@ def open_folder(folder: Path) -> None:
     """Show a folder in the system's file browser (Finder on macOS)."""
     opener = "open" if sys.platform == "darwin" else "explorer" if sys.platform == "win32" else "xdg-open"
     subprocess.Popen([opener, str(folder)])
-
-
-def _date(server_time: int) -> str:
-    return time.strftime("%Y-%m-%d", time.gmtime(server_time))
-
-
-def _evidence(models: ChampionModels, ledger: model_status.Ledger, champion_id: int) -> list[dict]:
-    """What a champion's Model Status rests on, oldest first: description tests, then checks."""
-    reconstruction = models.reconstruction(champion_id)
-    if reconstruction is None:
-        return [{"text": "Scored on its generic effects only: no reconstruction of its unique effects yet.", "passed": None}]
-    tests = reconstruction.description_tests
-    rows = [{
-        "text": f"Description tests: {len(tests)} ({', '.join(tests)}), kept passing by the test suite."
-        if tests else "No description tests yet: it can't reach Verified.",
-        "passed": bool(tests),
-    }]
-    record = ledger.records.get(champion_id)
-    for e in record.evidence if record else ():
-        rows.append({"text": (f"{_date(e.at)}: " if e.at else "") + e.text, "passed": e.passed})
-    return rows
 
 
 def _ago(seconds: float) -> str:

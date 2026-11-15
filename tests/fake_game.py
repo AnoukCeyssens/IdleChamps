@@ -155,27 +155,22 @@ class Live:
         self.data_dir = tmp_path / "data"
         self.log = write_request_log(tmp_path / "webRequestLog.txt")
         self.data_dir.mkdir()
-        self.pools: list[ManualPool] = []
-        self.step_pools: list[ManualPool] = []  # Next Steps' measuring pools; jobs run on `run()` too
+        self.pools: list[ManualPool] = []  # the background pools (Recompute and Next Steps share one)
         (self.data_dir / "config.toml").write_text(f'request_log = "{self.log}"\n')
 
     def app(self, background=lambda job: job(), pools: list | None = None):
-        """`pools` collects the Recompute's worker pools (`ManualPool`s: jobs run only when a
-        test says so); by default nothing is precomputed and pages compute on demand."""
+        """`pools` collects the background pools the Recompute and Next Steps share (`ManualPool`s:
+        jobs run only when a test says so); until a test runs them, pages compute on demand."""
         pools = self.pools if pools is None else pools
 
         def pool(initializer, initargs):
-            assert all(p.shut_down for p in pools), "two recomputes side by side"
+            assert all(p.shut_down for p in pools), "two background pools side by side"
             pools.append(ManualPool(initializer, initargs))
             return pools[-1]
 
-        def steps_pool(initializer, initargs):  # Next Steps' background measuring (#35)
-            self.step_pools.append(ManualPool(initializer, initargs))
-            return self.step_pools[-1]
-
         return create_live_app(
             self.data_dir, transport=self.server, clock=self.clock, sleep=self.clock.sleep, background=background,
-            executor=pool, steps_executor=steps_pool,
+            executor=pool,
         )
 
     def start(self, **kwargs) -> TestClient:
@@ -186,9 +181,12 @@ class Live:
         return client
 
 
+RECOMPUTE, STEPS = "compute_job", "measure_job"  # the two kinds of background job
+
+
 class ManualPool:
-    """A stand-in for the Recompute's process pool, in this process: a job runs only when a
-    test calls `run()`, so tests can look at the app while a recompute is half done."""
+    """A stand-in for the background process pool, in this process: a job runs only when a test
+    calls `run()`, so tests can look at the app while a recompute is half done."""
 
     def __init__(self, initializer, initargs) -> None:
         self._init = (initializer, initargs)
@@ -201,11 +199,19 @@ class ManualPool:
         self.pending.append((future, fn, args))
         return future
 
-    def run(self, count: int | None = None) -> None:
-        """Run the next `count` pending jobs (all by default), as a worker would."""
+    def jobs(self, kind: str) -> list[tuple]:
+        """The pending jobs' arguments of one kind (`RECOMPUTE` or `STEPS`)."""
+        return [args for _, fn, args in self.pending if fn.__name__ == kind]
+
+    def run(self, count: int | None = None, kind: str | None = None) -> None:
+        """Run the next `count` pending jobs (all by default; only `kind`'s if given), as a worker would."""
         initializer, initargs = self._init
-        while self.pending and (count is None or count > 0):
-            future, fn, args = self.pending.pop(0)
+        while (count is None or count > 0) and (
+            queued := [job for job in self.pending if kind is None or job[1].__name__ == kind]
+        ):
+            job = queued[0]
+            self.pending.remove(job)
+            future, fn, args = job
             if count is not None:
                 count -= 1
             if not future.set_running_or_notify_cancel():

@@ -223,7 +223,8 @@ def test_gold_farm_states_its_scoring_assumptions_and_unverified_champions(catal
     text = " ".join(rec.scoring_assumptions)
     assert "click" in text.lower() and "daily" in text.lower()
     assert "relative" in text
-    assert set(rec.unverified_champions) == {s.champion for s in _seated(rec)}
+    # Unverified = Check Failed or Stale; Not Modelled champions don't count (story 92/93).
+    assert set(rec.unverified_champions) == {s.champion for s in _seated(rec) if s.champion.id in RECONSTRUCTIONS}
     # Reconstructed champions (#40) start Stale until a live damage check; the rest are Not Modelled.
     assert all(
         s.model_status.value == ("Stale" if s.champion.id in RECONSTRUCTIONS else "Not Modelled") for s in _seated(rec)

@@ -41,7 +41,7 @@ def test_no_credential_appears_in_any_persisted_file(live):
 
 
 def test_a_new_session_starts_from_the_cached_snapshot(live):
-    live.start()
+    live.start().__exit__(None, None, None)  # the app stops
     live.clock.advance(300)
     live.log.write_text("")  # this time the startup Refresh fails
 

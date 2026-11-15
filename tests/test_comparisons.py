@@ -173,15 +173,15 @@ def _instance(responses, instance_id):
 def test_no_push_calibration_flags_on_the_recording(client):
     page = client.get("/model-status").text
 
-    # Instance 1 reached 420 against an estimate of 459 ± 42; instance 2 is at the boss of area 85,
-    # its estimated wall (84 ± 34).
+    # Instance 1 reached 420 against an estimate of 459 ± 15; instance 2 is at the boss of area 85,
+    # its estimated wall (84 ± 10), and its best area there is 84.
     assert not rows(page, "calibration-flag")
     assert rows(page, "no-calibration-flags")
 
 
 @pytest.fixture(scope="module")
 def beyond_the_band(tmp_path_factory) -> TestClient:
-    """Instance 2 (Pure Energy, estimate 84 ± 34) reached area 130."""
+    """Instance 2 (Pure Energy, estimate 84 ± 10) reached area 130."""
     return _app(tmp_path_factory, "beyond_the_band", lambda r: _instance(r, 2).update(highest_area="130"))
 
 
@@ -190,7 +190,28 @@ def test_a_run_beating_its_estimate_by_more_than_the_band_raises_a_push_calibrat
 
     [flag] = [r["text"] for r in rows(page, "calibration-flag")]
     assert flag == (
-        "Instance 2 on Pure Energy reached area 130: beyond the Push estimate for its formation (area 84 ± 34) by "
+        "Instance 2 on Pure Energy reached area 130: beyond the Push estimate for its formation (area 84 ± 10) by "
+        "46 areas, more than the band width."
+    )
+
+
+@pytest.fixture(scope="module")
+def best_beyond_the_band(tmp_path_factory) -> TestClient:
+    """Pure Energy's best area raised to 130 (story 98: "my best area beats the estimate"); instance 2's
+    own run is still at area 85."""
+
+    def raise_best(responses):
+        responses["getuserdetails"]["details"]["stats"]["highest_area_completed_ever_c9"] = 130
+
+    return _app(tmp_path_factory, "best_beyond_the_band", raise_best)
+
+
+def test_a_best_area_beating_the_estimate_by_more_than_the_band_raises_a_push_calibration_flag(best_beyond_the_band):
+    page = best_beyond_the_band.get("/model-status").text
+
+    [flag] = [r["text"] for r in rows(page, "calibration-flag")]
+    assert flag == (
+        "Instance 2 on Pure Energy has a best area of 130 there: beyond the Push estimate for its formation (area 84 ± 10) by "
         "46 areas, more than the band width."
     )
 

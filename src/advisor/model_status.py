@@ -125,6 +125,9 @@ def damage_checks(catalogue: Catalogue, account: Account, models: ChampionModels
         predicted = models.scorer(adventure.layout if adventure else (), "Push", main).score(seats).bud
         error = 100 * math.expm1(min(math.log(predicted) - math.log(instance.bud), 10.0))
         unmodelled = [i for i in ids if models.reconstruction(i) is None]
+        # Deliberate (review of spec #22): a Not Modelled champion's unique effects may buff the Main DPS
+        # and the model can't tell whether they do, so a miss here can't be pinned on the reconstructed
+        # champions (marking them Check Failed would be wrong) and a hit proves nothing about them.
         if unmodelled:
             outcome = "inconclusive"
             reason = f"{len(unmodelled)} of {len(ids)} champions Not Modelled; the generic layer can't predict the game's number"
@@ -169,7 +172,8 @@ class CalibrationFlag:
 
 def push_calibration(catalogue: Catalogue, account: Account, models: ChampionModels) -> tuple[CalibrationFlag, ...]:
     """Push calibration flags (#39): for each live run, the Push estimate for its formation in play
-    against the highest area that run reached. Raised when it beats the estimate by more than the
+    against the furthest it got: the run's highest area, or the best area on the adventure (story 98;
+    not for a patron run). Raised when it beats the estimate by more than the
     band width, or passes a boss the breaking check said it can't break in time."""
     flags = []
     for instance in account.instances:
@@ -180,6 +184,11 @@ def push_calibration(catalogue: Catalogue, account: Account, models: ChampionMod
         name = adventure.name if adventure else f"Adventure {instance.adventure_id}"
         reached = max(instance.highest_area, instance.current_area)
         where = f"Instance {instance.id} on {name} reached area {reached}"
+        # Story 98 says "my best area". The best area is shared with patron variants, so a patron
+        # run is judged on its own run only.
+        best = account.best_areas.get(instance.adventure_id) if not instance.patron_id else None
+        if best is not None and best > reached:
+            reached, where = best, f"Instance {instance.id} on {name} has a best area of {best} there"
         if estimate.band is not None and reached - estimate.area > estimate.band:
             flags.append(CalibrationFlag(instance.id, name, (
                 f"{where}: beyond the Push estimate for its formation (area {estimate.area} ± {estimate.band}) by "
@@ -210,6 +219,9 @@ def advance(ledger: Ledger,catalogue: Catalogue, account: Account, checks: tuple
                 f"Reworked ({record.rework_date or 'no date'} → {champion.last_rework_date or 'no date'}): "
                 "needs a new live damage check.", False, at,
             )
+        # Per-champion definitions hash rather than the global checksum on purpose: story 94 says Stale
+        # "when a rework or definitions change touches it"; the global checksum changes with every patch
+        # and would make every reconstruction Stale at once.
         elif record.fingerprint != fingerprint:
             stale = Evidence("Its definitions changed: needs a new live damage check.", False, at)
         else:

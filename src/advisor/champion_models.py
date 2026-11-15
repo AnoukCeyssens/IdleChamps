@@ -108,6 +108,7 @@ GEM_FARM_ASSUMPTIONS = (
     "Modron node bonuses are not modelled (no tile definitions): the core with the most experience is used, "
     "with its saved node layout.",
 )
+RANDOM_EFFECTS_ASSUMPTION = "Random effects are taken at their expected value."
 _SETUP_ASSUMPTIONS = (
     "Familiars and the modron core don't change this score: familiars go on the field on the Main DPS and its "
     "biggest supporters, any left over on clicks; the modron core keeps its saved reset area.",
@@ -119,6 +120,13 @@ class ModelStatus(enum.Enum):
     VERIFIED = "Verified"
     CHECK_FAILED = "Check Failed"
     STALE = "Stale"
+
+    @property
+    def unverified(self) -> bool:
+        """Scored on a full reconstruction that isn't verified (Check Failed or Stale; story 93): what
+        the "unverified" badge and the Push band's +3 count. Not Modelled champions are scored on
+        their generic effects only, never overstated (story 92), so they don't count."""
+        return self in (ModelStatus.CHECK_FAILED, ModelStatus.STALE)
 
 
 @dataclass(frozen=True)
@@ -458,6 +466,7 @@ class ChampionModels:
                 "Active player: click damage and click-based effects assume regular clicking.",
                 "Daily-cap effects (gold and chest scavenging) are taken at their full daily cap, collected by an "
                 "active player.",
+                RANDOM_EFFECTS_ASSUMPTION,
                 "Armoured and hits-based monsters (breaking) are ignored for Gold Farm.",
                 *_SETUP_ASSUMPTIONS,
                 *common,
@@ -466,6 +475,9 @@ class ChampionModels:
             return (
                 "Push is scored on Main DPS damage, with stacking effects at max_stacks (Not Modelled champions' "
                 "stacks are not counted yet).",
+                RANDOM_EFFECTS_ASSUMPTION,
+                "Active player: click damage and click-based effects assume regular clicking, and daily-cap effects "
+                "are taken at their full daily cap.",
                 *_SETUP_ASSUMPTIONS,
                 *common,
             )

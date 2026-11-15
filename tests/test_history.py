@@ -195,9 +195,11 @@ def test_the_record_holds_account_totals_and_each_running_games_run(live):
     assert first["push_estimate"]["objective"] == 50
     assert second["adventure_id"] == 9
     assert second["formation"] == [3, 1, 6, 7, 2, 5, 4, 13, -1]
-    # The Push estimate for the formation in play (worked out in test_push.py): Asharra's own run anchors it.
+    # The Push estimate for the formation in play: Asharra's own run anchors it, so the damage is its BUD ×
+    # 30 s / 5 s (cooldown not loaded) = 4.2666e27 × 6, log10 28.408: boss 80 (27.009) dies, boss 85
+    # (28.547) doesn't. None of its champions is reconstructed (none unverified): band 10, 84 is 16 short of 100.
     assert second["push_estimate"] == {
-        "expected_area": 85, "area": 84, "band": 34, "objective": 100, "verdict": "Borderline",
+        "expected_area": 85, "area": 84, "band": 10, "objective": 100, "verdict": "Unlikely",
     }
 
 

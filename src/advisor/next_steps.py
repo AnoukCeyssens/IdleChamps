@@ -27,16 +27,16 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from concurrent.futures import Executor, Future
-from dataclasses import dataclass, replace
+from concurrent.futures import Future
+from dataclasses import dataclass
 
-from advisor.account import RARITY_NAMES, Account, parse_account
-from advisor.catalogue import Adventure, Catalogue, Patron, parse_catalogue
-from advisor.champion_models import ChampionModels, ModelStatus
+from advisor.account import RARITY_NAMES, Account
+from advisor.background import DataKey, WorkerData, Workers, worker_data
+from advisor.catalogue import Adventure, Catalogue, Patron
+from advisor.champion_models import ChampionModels
 from advisor.explorer import is_done, is_running, is_unlocked, patron_completion, tree
 from advisor.hints import CONTRACT_LEVELS, MIN_GAIN_PCT, MODRON_LEVEL_EXP, Change, Hint, candidate_changes, measure
 from advisor.push_verdict import PushVerdict
-from advisor.recompute import _area_sets_key, _statuses_key
 from advisor.recommendation import FormationRecommendation, recommend, with_search_problem
 from advisor.request_log import RawResponses
 from advisor.store import Store
@@ -227,7 +227,7 @@ class NextStep:
     why: str  # which seat or which buff to the Main DPS
     assumption: str  # the Scoring Assumption the gain rests on
     cost: str  # what it needs, against what the player holds
-    unverified: bool  # a champion involved has no verified Champion Model
+    unverified: bool  # a champion involved is unverified (Check Failed or Stale)
     source: str | None = None  # unowned champion: where it comes from
     obtainable: bool = True  # unowned champion: obtainable right now
 
@@ -252,6 +252,8 @@ def next_steps(
     by_action: dict[str, list[tuple[Adventure, Hint]]] = {}
     for adventure in focus:
         for hint in measured.get(adventure.id, ()):
+            if hint.change.kind == "potion":
+                continue  # potions are hints only, never Next Steps
             by_action.setdefault(hint.change.action, []).append((adventure, hint))
     steps = []
     for found in by_action.values():
@@ -267,7 +269,7 @@ def next_steps(
                 FocusGain(a, h.gain_pct, _metric(h.recommendation), is_running(catalogue, account, a)) for a, h in found
             ),
             why=_why(catalogue, change, best),
-            assumption=best.scoring_assumptions[0] if best.scoring_assumptions else "",
+            assumption=_assumption(catalogue, change, best),
             cost=_cost(catalogue, account, change),
             unverified=change.champion_id is not None
             and any(change.champion_id in {c.id for c in h.recommendation.unverified_champions} for _, h in found),
@@ -281,9 +283,11 @@ def next_steps(
 def measure_adventure(
     catalogue: Catalogue, account: Account, rec: FormationRecommendation, *, models: ChampionModels | None = None
 ) -> tuple[Hint, ...]:
-    """One Focus adventure's hints for Next Steps: every one-change but potions, all of them."""
+    """One Focus adventure's one-changes, all of them, best first: Next Steps leave the potions
+    out, the Formation view's hints show the best `RAIL_HINTS` (spec: hints are computed in the
+    background for Focus Set adventures)."""
     rec = with_search_problem(catalogue, account, rec, models=models)
-    return measure(catalogue, account, rec, candidate_changes(catalogue, account, potions=False), models=models, limit=None)
+    return measure(catalogue, account, rec, candidate_changes(catalogue, account), models=models, limit=None)
 
 
 def _pct(value: float) -> str:
@@ -306,6 +310,18 @@ def _why(catalogue: Catalogue, change: Change, rec: FormationRecommendation) -> 
     return f"{seat.champion.name} in slot {seat.slot}: {seat.contribution_label}" if seat.contribution_label else (
         f"{seat.champion.name} in slot {seat.slot}, buffing {main}"
     )
+
+
+def _assumption(catalogue: Catalogue, change: Change, rec: FormationRecommendation) -> str:
+    """The Scoring Assumption the step's gain depends on (story 73): the changed champion's own
+    (its reconstruction states it as "<name>: ...", e.g. Briv's simulated skips), otherwise the Run
+    Goal's scoring basis (how the metric is computed, always its first assumption)."""
+    if change.champion_id is not None and catalogue.find(change.champion_id):
+        prefix = f"{catalogue.champion(change.champion_id).name}: "
+        own = next((a for a in rec.scoring_assumptions if a.startswith(prefix)), None)
+        if own is not None:
+            return own
+    return rec.scoring_assumptions[0] if rec.scoring_assumptions else ""
 
 
 def _cost(catalogue: Catalogue, account: Account, change: Change) -> str:
@@ -342,47 +358,34 @@ def _obtainable(catalogue: Catalogue, account: Account, champion_id: int) -> boo
 # --- background measuring ----------------------------------------------------------------------
 
 StepKey = tuple[int, str]  # (adventure id, Run Goal)
-ExecutorFactory = Callable[[Callable, tuple], Executor]
 
 
 class Steps:
-    """Each Focus adventure's measured hints per Run Goal, for the current data. With an
-    `executor` (live mode) missing ones are measured in a background pool; otherwise on demand.
-    Keyed like the Recompute: a Refresh that keeps the recommendation key keeps them."""
+    """Each Focus adventure's measured one-changes per Run Goal (potions included: the Formation
+    view's hints reuse them), for the current data. With background `workers` (live mode) missing
+    ones are measured in the shared pool; otherwise on demand. Keyed like the Recompute
+    (`background.DataKey`): a Refresh that keeps the key keeps them."""
 
-    def __init__(self, executor: ExecutorFactory | None = None) -> None:
-        self._executor_factory = executor
+    def __init__(self, workers: Workers | None = None) -> None:
+        self._workers = workers or Workers()
         self._lock = threading.Lock()
-        self._key: tuple | None = None
+        self._key: DataKey | None = None
         self._run = 0
-        self._raw: RawResponses | None = None
-        self._worker_args: tuple = (None, {})  # the Area Set Cache and Model Statuses, for workers
         self._measured: dict[StepKey, tuple[Hint, ...]] = {}
         self._pending: set[StepKey] = set()
-        self._pool: Executor | None = None
+        self._loaded = False
 
-    def update(
-        self, raw: RawResponses, account: Account, catalogue: Catalogue | None = None,
-        models: ChampionModels | None = None,
-    ) -> None:
-        """New data loaded: drop everything measured on other data (and cancel its jobs). Workers
-        get `catalogue`'s Area Set Cache (Push verdicts and breaking) and `models`' Model Statuses,
-        and both are part of the key, as in the Recompute."""
-        key = (account.recommendation_key, str(raw["getdefinitions"].get("checksum")))
-        area_sets = dict(catalogue.area_sets) if catalogue is not None else None
-        statuses = {k: v.value for k, v in models.statuses.items()} if models is not None else {}
-        key += (_area_sets_key(catalogue) if catalogue is not None else "", _statuses_key(models) if models else "")
+    def update(self, raw: RawResponses, account: Account, catalogue: Catalogue, models: ChampionModels) -> None:
+        """New data loaded: drop everything measured on other data (and cancel its jobs)."""
+        key = DataKey.of(raw, catalogue, account, models)
         with self._lock:
-            self._raw = raw
-            self._worker_args = (area_sets, statuses)
+            self._loaded = True
             if key == self._key:
                 return
             self._key = key
             self._run += 1
             self._measured, self._pending = {}, set()
-            pool, self._pool = self._pool, None
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+        self._workers.use(key, WorkerData.of(raw, catalogue, models))
 
     def drop(self, adventure_id: int, goal: str) -> None:
         """The shown recommendation changed (e.g. "Prove it's the best"): measure again."""
@@ -403,30 +406,24 @@ class Steps:
 
     def ensure(self, wanted: Iterable[StepKey]) -> None:
         """Queue the background measuring of whatever is wanted and not measured or queued yet."""
-        if self._executor_factory is None:
+        if not self._workers.enabled:
             return
         with self._lock:
-            if self._raw is None:
+            if not self._loaded:
                 return
             missing = [k for k in dict.fromkeys(wanted) if k not in self._measured and k not in self._pending]
-            if not missing:
-                return
             self._pending.update(missing)
-            run, raw = self._run, self._raw
-            if self._pool is None:
-                self._pool = self._executor_factory(_init_worker, (dict(raw), *self._worker_args))
-            pool = self._pool
+            run = self._run
         for adventure_id, goal in missing:
-            pool.submit(_measure_job, adventure_id, goal).add_done_callback(
-                lambda future, k=(adventure_id, goal), run=run: self._collect(run, k, future)
+            self._workers.submit(
+                lambda future, k=(adventure_id, goal), run=run: self._collect(run, k, future),
+                measure_job, adventure_id, goal,
             )
 
     def close(self) -> None:
         with self._lock:
             self._run += 1
-            pool, self._pool = self._pool, None
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+        self._workers.close()
 
     def _collect(self, run: int, key: StepKey, future: Future) -> None:
         if future.cancelled():
@@ -441,29 +438,11 @@ class Steps:
             self._pending.discard(key)
             if hints is not None:
                 self._measured.setdefault(key, hints)
-            pool = self._pool if not self._pending else None
-            if pool is not None:
-                self._pool = None
-        if pool is not None:
-            pool.shutdown(wait=False)
 
 
-# Worker side: each pool process parses the snapshot once, then measures one adventure per job.
-_WORKER: tuple[Catalogue, Account, ChampionModels] | None = None
-
-
-def _init_worker(raw: RawResponses, area_sets: dict | None = None, statuses: dict | None = None) -> None:
-    """Like the Recompute's workers: the app's Area Set Cache and Model Statuses over the snapshot."""
-    global _WORKER
-    catalogue, account = parse_catalogue(raw), parse_account(raw)
-    if area_sets is not None:
-        catalogue = replace(catalogue, area_sets=area_sets)
-    models = ChampionModels(catalogue, account, statuses={k: ModelStatus(v) for k, v in (statuses or {}).items()})
-    _WORKER = (catalogue, account, models)
-
-
-def _measure_job(adventure_id: int, goal: str) -> tuple[Hint, ...]:
-    catalogue, account, models = _WORKER
+def measure_job(adventure_id: int, goal: str) -> tuple[Hint, ...]:
+    """Worker side: one Focus adventure's one-changes."""
+    catalogue, account, models = worker_data()
     adventure = catalogue.adventure(adventure_id)
     if adventure is None:
         return ()

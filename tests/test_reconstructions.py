@@ -26,7 +26,9 @@ from advisor.catalogue import parse_catalogue
 from advisor.champion_models import RECONSTRUCTIONS, ChampionModels, Loadout, ModelStatus, Seat
 from advisor.push_verdict import push_verdict
 from advisor.recommendation import recommend
-from advisor.request_log import read_responses
+from advisor.request_log import read_responses, write_responses
+from advisor.web import create_app
+from fastapi.testclient import TestClient
 from conftest import FIXTURE_LOG, rows
 from test_recommendation import DIAMOND
 
@@ -40,9 +42,16 @@ def recorded():
     return read_responses(FIXTURE_LOG)
 
 
-def _domain(raw, *, tables=None, owned=(), gear=(), heroes_only=None):
+def _domain(raw, **kw):
     """Catalogue, account and models for the recording plus definitions `tables`, champions `owned`
     (level 1000) with `gear` (hero, slot, rarity, item level), optionally keeping only `heroes_only`."""
+    raw = _changed(raw, **kw)
+    catalogue, account = parse_catalogue(raw), parse_account(raw)
+    return catalogue, account, ChampionModels(catalogue, account)
+
+
+def _changed(raw, *, tables=None, owned=(), gear=(), heroes_only=None):
+    """The recording's responses with those changes (see `_domain`)."""
     raw = copy.deepcopy(raw)
     raw["getdefinitions"] = {**raw["getdefinitions"], **(tables or {})}
     details = raw["getuserdetails"]["details"]
@@ -54,8 +63,7 @@ def _domain(raw, *, tables=None, owned=(), gear=(), heroes_only=None):
         details["loot"].append({"hero_id": hero_id, "slot_id": slot, "rarity": rarity, "gild": 0, "enchant": level - 1})
     if heroes_only is not None:
         details["heroes"] = [h for h in details["heroes"] if int(h["hero_id"]) in heroes_only]
-    catalogue, account = parse_catalogue(raw), parse_account(raw)
-    return catalogue, account, ChampionModels(catalogue, account)
+    return raw
 
 
 # --- the framework ---------------------------------------------------------------------------------
@@ -211,6 +219,23 @@ def test_briv_skips_raise_gems_per_hour_and_state_the_monte_carlo(recorded):
     assert rec.score > 1.5 * plain.score
     assert any("Briv" in a and "Monte-Carlo" in a for a in rec.scoring_assumptions)
     assert not any("Briv:" in a for a in plain.scoring_assumptions)
+
+
+def test_a_next_step_names_the_scoring_assumption_its_gain_depends_on(recorded, tmp_path):
+    """Story 73: a Briv gear step's Gem Farm gain rests on Briv's simulated skips, so its reason
+    names that assumption rather than the Run Goal's general one."""
+    raw = _changed(recorded, tables=_briv_tables(), owned=(BRIV,), gear=[(BRIV, 4, 4, 1001)],
+                   heroes_only={BRIV, ARKHAN, CELESTE})
+    log = tmp_path / "requestlog.log.gz"
+    write_responses(raw, log)
+    client = TestClient(create_app(log))
+    client.post("/adventures/7/focus", params={"goal": "Gem Farm", "pin": "true"})
+    client.post("/adventures/2036/focus", params={"goal": "Gem Farm", "pin": "false"})
+
+    page = client.get("/next-steps/steps", params={"goal": "Gem Farm", "all": "true"}).text
+
+    reason = next(r["text"] for r in rows(page, "step-reason") if r["text"].startswith("Blacksmith contract on Briv's slot 4"))
+    assert reason.split("Scoring Assumption: ")[1].startswith("Briv: ")
 
 
 def test_briv_gem_farm_gap_is_an_upper_bound(recorded):

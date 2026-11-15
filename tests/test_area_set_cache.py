@@ -13,7 +13,7 @@ from advisor.area_sets import area_sets_from
 from advisor.request_log import read_responses
 from advisor.store import Store
 from conftest import FIXTURE_LOG, rows
-from fake_game import user_details
+from fake_game import RECOMPUTE, user_details
 
 PURE_ENERGY = "/adventures/9?goal=Push"
 MORTE_FREE_PLAY = "/adventures/2040?goal=Push"
@@ -43,7 +43,7 @@ def _settle(live, adventure_ids=(9, 2040)) -> None:
     if not live.pools:
         return
     pool = live.pools[-1]
-    mine = [job for job in pool.pending if job[2][0] in adventure_ids]
+    mine = [job for job in pool.pending if job[1].__name__ == RECOMPUTE and job[2][0] in adventure_ids]
     pool.pending = mine + [job for job in pool.pending if job not in mine]
     pool.run(len(mine))
 

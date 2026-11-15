@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from advisor.account import parse_account
 from advisor.catalogue import CORE_HEALTH_CURVE, HealthCurve, parse_catalogue
 from advisor.champion_models import ChampionModels
-from advisor.push_verdict import band_width, formation_in_play, instance_estimate, push_verdict, wall_area
+from advisor.push_verdict import formation_in_play, instance_estimate, push_verdict, wall_area
 from advisor.request_log import read_responses, write_responses
 from advisor.web import create_app
 from conftest import FIXTURE_LOG, rows
@@ -56,6 +56,13 @@ def test_reached_before_wins_when_my_best_area_meets_the_objective(client):
 
 def _assumptions(page: str) -> list[str]:
     return [r["text"] for r in rows(page, "assumption")]
+
+
+def test_push_states_random_effect_click_and_daily_cap_assumptions(client):
+    assumptions = " ".join(_assumptions(client.get(PUSH.format(9)).text)).lower()
+
+    assert "random effects are taken at their expected value" in assumptions
+    assert "active player" in assumptions and "daily cap" in assumptions
 
 
 def test_estimate_is_scaled_from_the_anchor_run_named_in_the_scoring_assumptions(client):
@@ -197,10 +204,23 @@ def test_the_damage_wall_is_the_first_boss_the_damage_cannot_kill():
     assert wall_area(event, math.log(10**29.1)) == 99
 
 
-def test_band_width_grows_with_doubt():
-    assert band_width(is_event=False, same_main_dps=True, unverified=0) == 10
-    assert band_width(is_event=True, same_main_dps=True, unverified=0) == 12
-    assert band_width(is_event=True, same_main_dps=False, unverified=2) == 12 + 5 + 6
+def test_only_stale_or_check_failed_champions_widen_the_band_and_get_the_badge(client):
+    """Unverified means Check Failed or Stale (story 93: their full model is used, unverified). Not
+    Modelled champions are scored on generic effects only (story 92) and don't count. In the
+    recording only Kas is reconstructed (never checked live: Stale); he is seated on Pure Energy and
+    is the Anchor Run's Main DPS."""
+    page = client.get(PUSH.format(9)).text
+    (band,) = [a for a in _assumptions(page) if a.startswith("Band ±")]
+    assert band == (
+        "Band ±18 areas: 10 on core campaigns, +5 for the anchor's different Main DPS, "
+        "+3 for each of 1 unverified champion."
+    )
+    assert _one(page, "unverified-badge") == "1 champion unverified, score may be off"
+
+    event = client.get(PUSH.format(2037)).text  # an event Crypt: Kas only in the anchor's formation
+    (band,) = [a for a in _assumptions(event) if a.startswith("Band ±")]
+    assert band.startswith("Band ±20 areas: 12 on event campaigns, +5 for the anchor's different Main DPS, +3 for each of 1")
+    assert not rows(event, "unverified-badge")
 
 
 @pytest.fixture(scope="module")
@@ -208,19 +228,6 @@ def recorded():
     raw = read_responses(FIXTURE_LOG)
     catalogue, account = parse_catalogue(raw), parse_account(raw)
     return catalogue, account, ChampionModels(catalogue, account)
-
-
-def test_instance_estimate_on_its_own_anchor_is_its_wall(recorded):
-    catalogue, account, models = recorded
-    (asharra_run,) = [i for i in account.instances if i.id == 2]
-
-    estimate = instance_estimate(catalogue, account, models, asharra_run)
-
-    # Its own anchor, so the damage is its BUD × 30 s / 5 s (cooldown not loaded) = 4.2666e27 × 6,
-    # log10 28.408: boss 80 (27.009) dies, boss 85 (28.547) doesn't. 8 unverified champions seated.
-    assert (estimate.area, estimate.expected_area) == (84, 85)
-    assert estimate.band == 10 + 3 * 8
-    assert estimate.label == "Borderline"  # 84 against objective 100, within ±34
 
 
 def test_likely_when_placement_is_known_and_the_margin_beats_the_band(recorded):

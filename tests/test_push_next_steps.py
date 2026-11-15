@@ -17,7 +17,6 @@ from fastapi.testclient import TestClient
 from advisor.request_log import read_responses, write_responses
 from advisor.web import create_app
 from conftest import FIXTURE_LOG, rows
-from test_model_status import reconstructed  # noqa: F401 (fixture)
 
 PUSH = "/next-steps?goal=Push"
 
@@ -182,52 +181,35 @@ def _push_steps(client) -> str:
 
 
 def test_an_area_set_learnt_by_a_refresh_measures_the_push_steps_again(live):
+    from fake_game import STEPS
+
     live.server.queue("getuserdetails", _small(6), _small())
     client = live.start()
-    [first] = live.step_pools
-    assert (9, "Push") in [job[2] for job in first.pending]  # Pure Energy, the Push Focus Set
-    first.run()
+    [first] = live.pools
+    assert (9, "Push") in first.jobs(STEPS)  # Pure Energy, the Push Focus Set
+    first.run(kind=STEPS)
     assert not rows(_push_steps(client), "steps-measuring")
 
     live.clock.advance(3600)
     client.post("/refresh")  # brings Area Set 6: same recommendation key, a new Area Set Cache
 
-    [_, second] = live.step_pools
-    assert (9, "Push") in [job[2] for job in second.pending]
+    [_, second] = live.pools  # the harness fails if it starts before the first is shut down
+    assert (9, "Push") in second.jobs(STEPS)
     assert rows(_push_steps(client), "steps-measuring")
 
 
-def test_background_workers_measure_over_the_area_set_cache_not_just_the_snapshot(live):
-    from advisor import next_steps
+def test_next_steps_and_the_recompute_share_one_background_pool(live):
+    """Same workers, same data (snapshot, Area Set Cache, Model Statuses): two never run side by side."""
+    from fake_game import RECOMPUTE, STEPS
 
     live.server.queue("getuserdetails", _small())
-    live.start().__exit__(None, None, None)  # the Store's Area Set Cache now holds set 6
-    live.server.queue("getuserdetails", _small(6))  # a snapshot that doesn't bring it
     client = live.start()
 
-    live.step_pools[-1].run()
-
-    # No Push score in the recording depends on placement (it has no attack_defines), so look at
-    # what the worker measured on: the app's Area Set Cache, as the Recompute's workers do.
-    catalogue, _, _ = next_steps._WORKER
-    assert 6 in catalogue.area_sets
+    [pool] = live.pools
+    assert pool.jobs(RECOMPUTE) and pool.jobs(STEPS)
+    pool.run()
+    assert pool.shut_down  # idle: nothing left
     assert not rows(_push_steps(client), "steps-measuring")
-
-
-def test_background_workers_measure_with_the_model_statuses_validation_gave(live, reconstructed):
-    from advisor import next_steps
-
-    client = live.start()  # the live damage check on instance 2 sets its champions' statuses
-    shown = {r["text"] for r in rows(client.get("/model-status").text, "model-status")}
-    assert any(not s.endswith("Not Modelled") for s in shown)
-    pool = live.step_pools[-1]
-    pool.pending.sort(key=lambda job: job[2] != (9, "Push"))
-
-    pool.run(1)
-
-    _, _, models = next_steps._WORKER
-    assert models.statuses  # the reconstructed champions' statuses, not all Not Modelled
-    assert models.statuses == live_statuses(client, models.statuses)  # incl. #40's reconstructed batch (Stale)
 
 
 def live_statuses(client, ids=None) -> dict:

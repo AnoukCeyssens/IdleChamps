@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from advisor.request_log import read_responses, write_responses
 from advisor.web import create_app
 from conftest import FIXTURE_LOG, rows
+from fake_game import STEPS
 
 GEM, GOLD = "/next-steps?goal=Gem%20Farm", "/next-steps?goal=Gold%20Farm"
 
@@ -147,8 +148,8 @@ def test_unverified_badge_unowned_source_and_cost(hinted):
     evelyn = _step(page, EVELYN)
     contract = _step(_steps(hinted, all=True), "Blacksmith contract on Spurt's slot 1")
 
-    # Every champion is Not Modelled until #38/#40: badged, still ranked first.
-    assert "unverified champion" in evelyn["text"]
+    # Evelyn is Not Modelled (generic effects only), not unverified: no badge, ranked first.
+    assert "unverified champion" not in evelyn["text"]
     assert "Source: The Great Modron March, Year 1 · can't be obtained right now (event not running)" in evelyn["text"]
     # The recording holds no Large Blacksmithing Contracts (buff 34).
     assert "Cost: needs 1 Large Blacksmithing Contract (24 item levels), you have 0" in contract["text"]
@@ -176,15 +177,15 @@ def live_client(live):
 
 def test_focus_adventures_are_measured_in_the_background_after_a_refresh(live, live_client):
     # Gold Farm's and Push's Pure Energy; Gem Farm's last-played adventure isn't in the snapshot.
-    [pool] = live.step_pools
-    assert sorted(job[2] for job in pool.pending) == [(9, "Gold Farm"), (9, "Push")]
+    [pool] = live.pools  # shared with the Recompute: never two background pools side by side
+    assert sorted(pool.jobs(STEPS)) == [(9, "Gold Farm"), (9, "Push")]
 
     waiting = _steps(live_client)
     assert rows(waiting, "steps-measuring")[0]["text"].startswith("Measuring in the background: 1 of 1")
     assert not rows(waiting, "step")
 
-    pool.run()
-    assert pool.shut_down  # nothing left to measure
+    pool.run(kind=STEPS)
+    assert not pool.jobs(STEPS)  # nothing left to measure
     page = _steps(live_client)
     assert not rows(page, "steps-measuring")
     # The recording's own gear effects: Spurt's slot 1 chest, as in the formation's hints.
@@ -195,7 +196,7 @@ def test_a_pinned_focus_set_is_kept_in_the_store_across_restarts(live, live_clie
     live_client.post("/adventures/7/focus?goal=Gold%20Farm&pin=true")
     live_client.post("/adventures/9/focus?goal=Gem%20Farm&pin=true")
 
-    assert len(live.step_pools[0].pending) == 4  # each newly pinned adventure is measured too (+ Push's Pure Energy)
+    assert len(live.pools[0].jobs(STEPS)) == 4  # each newly pinned adventure is measured too (+ Push's Pure Energy)
     live.server.queue("getuserdetails", _small())
     restarted = live.start(pools=[])  # a new app on the same data folder (its own recompute)
 

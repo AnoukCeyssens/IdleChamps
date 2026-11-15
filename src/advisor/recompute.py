@@ -8,25 +8,22 @@ currency-only Refresh) reuses them.
 While a recompute runs, the results from before it stay visible, marked stale. A Refresh that
 changes the key cancels the pending jobs and restarts from the new snapshot; the old pool is shut
 down (its running jobs finished) before the new one starts, so two recomputes never run side by
-side. Anything not precomputed (a patron variant, a job that failed) is computed on demand.
+side; Next Steps' background measuring shares the same pool (`background.Workers`). Anything not
+precomputed (a patron variant, a job that failed) is computed on demand.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-import os
 import threading
-from collections.abc import Callable, Iterable
-from concurrent.futures import Executor, Future, ProcessPoolExecutor
-from dataclasses import dataclass, replace
-from pathlib import Path
+from collections.abc import Iterable
+from concurrent.futures import Future
+from dataclasses import dataclass
 
-from advisor import area_sets
-from advisor.account import Account, parse_account
-from advisor.catalogue import Adventure, Catalogue, parse_catalogue
-from advisor.champion_models import ChampionModels, ModelStatus
+from advisor.account import Account
+from advisor.background import DataKey, WorkerData, Workers, worker_data
+from advisor.catalogue import Adventure, Catalogue
+from advisor.champion_models import ChampionModels
 from advisor.recommendation import FormationRecommendation, recommend
 from advisor.request_log import RawResponses
 from advisor.results_codec import Decoder, Encoder
@@ -35,35 +32,6 @@ from advisor.store import Store
 _log = logging.getLogger(__name__)
 
 ResultKey = tuple[int, str, int | None]  # (adventure id, Run Goal, patron id or None)
-ExecutorFactory = Callable[[Callable, tuple], Executor]  # (worker initializer, its args) -> pool
-
-
-def process_pool(initializer: Callable, initargs: tuple) -> Executor:
-    return ProcessPoolExecutor(max_workers=max(1, (os.cpu_count() or 2) - 1), initializer=initializer, initargs=initargs)
-
-
-def _code_fingerprint() -> str:
-    """Hash of the advisor's source: results computed by other code are never reused."""
-    digest = hashlib.sha256()
-    root = Path(__file__).parent
-    for path in sorted([*root.rglob("*.py"), *(p for p in (root / "curated").rglob("*") if p.is_file())]):
-        digest.update(path.read_bytes())
-    return digest.hexdigest()[:16]
-
-
-CODE = _code_fingerprint()
-
-
-def _area_sets_key(catalogue: Catalogue) -> str:
-    """Fingerprint of the Area Set Cache: a set learnt or overwritten changes Push verdicts."""
-    data = json.dumps(area_sets.to_json(catalogue.area_sets), sort_keys=True)
-    return hashlib.sha256(data.encode("utf-8")).hexdigest()[:16]
-
-
-def _statuses_key(models: ChampionModels) -> str:
-    """Fingerprint of the Model Statuses validation gave the reconstructed champions."""
-    data = json.dumps({str(k): v.value for k, v in models.statuses.items()}, sort_keys=True)
-    return hashlib.sha256(data.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -75,20 +43,20 @@ class Progress:
 
 
 class Recompute:
-    def __init__(self, goals: Iterable[str], *, store: Store | None = None, executor: ExecutorFactory | None = None):
-        """`goals`: the Run Goals to precompute. Without `executor` nothing is precomputed
-        (offline mode): results are computed on demand and kept until the data changes."""
+    def __init__(self, goals: Iterable[str], *, store: Store | None = None, workers: Workers | None = None):
+        """`goals`: the Run Goals to precompute. Without background `workers` nothing is
+        precomputed (offline mode): results are computed on demand and kept until the data changes."""
         self._goals = tuple(goals)
         self._store = store
-        self._executor_factory = executor
+        self._workers = workers or Workers()
         self._lock = threading.Lock()  # guards the state below; held briefly
         self._update_lock = threading.Lock()  # one update at a time (pool shut down outside _lock)
-        self._key: tuple | None = None
+        self._key: DataKey | None = None
         self._inputs: tuple[Catalogue, Account, ChampionModels] | None = None
         self._fresh: dict[ResultKey, FormationRecommendation] = {}
         self._old: dict[ResultKey, FormationRecommendation] = {}  # stale, shown while recomputing
         self._run = 0  # bumps on every key change: jobs of an earlier run are ignored
-        self._pool: Executor | None = None
+        self._running = False
         self._done = self._total = self._completed = 0
         self._complete = False  # every adventure × goal is in _fresh for the current key
 
@@ -97,30 +65,28 @@ class Recompute:
     ) -> None:
         """New data loaded. `precompute`: start a recompute if the results for it are missing
         (after a Refresh); otherwise only reuse what the Store holds (at start)."""
-        key = (account.recommendation_key, str(raw["getdefinitions"].get("checksum")), CODE, _area_sets_key(catalogue))
-        key += (_statuses_key(models),)  # Model Status changes badges and Push bands (#38)
+        key = DataKey.of(raw, catalogue, account, models)
         with self._update_lock:
             with self._lock:
                 self._inputs = (catalogue, account, models)
                 if key == self._key:  # e.g. a currency-only Refresh: keep results and any running recompute
-                    if self._complete or self._pool is not None or not precompute:
+                    if self._complete or self._running or not precompute:
                         return
                 else:
                     self._key = key
                     self._run += 1
                     self._old = {**self._old, **self._fresh}
-                    self._fresh, self._complete = {}, False
-                old_pool, self._pool = self._pool, None
+                    self._fresh, self._complete, self._running = {}, False, False
                 run = self._run
-            if old_pool is not None:  # outside _lock: its finishing jobs report through _collect
-                old_pool.shutdown(wait=True, cancel_futures=True)
+            # Cancels the earlier data's pending jobs and waits for its running ones.
+            self._workers.use(key, WorkerData.of(raw, catalogue, models))
             if self._load_persisted(key, catalogue):
                 return
-            if not precompute or self._executor_factory is None:
+            if not precompute or not self._workers.enabled:
                 with self._lock:
                     self._old, self._done, self._total = {}, 0, 0
                 return
-            self._start(run, raw, catalogue)
+            self._start(run, catalogue)
 
     def get(self, adventure: Adventure, goal: str, patron: int | None = None) -> tuple[FormationRecommendation, bool]:
         """The recommendation and whether it is stale (from before the running recompute)."""
@@ -147,43 +113,33 @@ class Recompute:
 
     def available(self) -> list[tuple[FormationRecommendation, bool]]:
         """Every recommendation held now, without computing any: (recommendation, stale). A fresh
-        result hides the stale one for the same adventure × goal × patron."""
+        result hides the stale one for the same adventure × goal × patron; once a recompute
+        finished, every one is fresh."""
         with self._lock:
             old = [(rec, True) for key, rec in self._old.items() if key not in self._fresh]
             return [(rec, False) for rec in self._fresh.values()] + old
 
-    def held(self) -> tuple[FormationRecommendation, ...]:
-        """Every recommendation computed for the current data so far (all of them once a recompute
-        finished; offline, the ones opened). The Model Status page reads their comparisons (#39)."""
-        with self._lock:
-            return tuple(self._fresh.values())
-
     def progress(self) -> Progress:
         with self._lock:
-            return Progress(self._pool is not None, self._done, self._total, self._completed)
+            return Progress(self._running, self._done, self._total, self._completed)
 
     def close(self) -> None:
         """Cancel any pending jobs (on app shutdown)."""
         with self._lock:
             self._run += 1
-            pool, self._pool = self._pool, None
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+            self._running = False
+        self._workers.close()
 
-    def _start(self, run: int, raw: RawResponses, catalogue: Catalogue) -> None:
+    def _start(self, run: int, catalogue: Catalogue) -> None:
         adventures = [a.id for a in catalogue.adventures]
         if not adventures:
             with self._lock:
                 self._old, self._complete = {}, True
             return
-        statuses = {k: v.value for k, v in self._inputs[2].statuses.items()} if self._inputs else {}
-        pool = self._executor_factory(_init_worker, (dict(raw), dict(catalogue.area_sets), statuses))
         with self._lock:
-            self._pool, self._done, self._total = pool, 0, len(adventures)
+            self._running, self._done, self._total = True, 0, len(adventures)
         for adventure_id in adventures:
-            pool.submit(_compute, adventure_id, self._goals).add_done_callback(
-                lambda future, run=run: self._collect(run, future)
-            )
+            self._workers.submit(lambda future, run=run: self._collect(run, future), compute_job, adventure_id, self._goals)
 
     def _collect(self, run: int, future: Future) -> None:
         if future.cancelled():
@@ -200,15 +156,13 @@ class Recompute:
             self._done += 1
             if self._done < self._total:
                 return
-            pool, self._pool = self._pool, None
+            self._running = False
             self._old, self._complete = {}, True
             self._completed += 1
             key, fresh = self._key, dict(self._fresh)
-        if pool is not None:
-            pool.shutdown(wait=False)
         self._persist(key, fresh)
 
-    def _persist(self, key: tuple, results: dict[ResultKey, FormationRecommendation]) -> None:
+    def _persist(self, key: DataKey, results: dict[ResultKey, FormationRecommendation]) -> None:
         if self._store is None or self._inputs is None:
             return
         encode = Encoder(self._inputs[0])
@@ -219,15 +173,15 @@ class Recompute:
             except TypeError:
                 continue  # a field the codec can't write yet: recomputed on demand after a restart
         try:
-            self._store.save_results(list(key), entries)
+            self._store.save_results(key.to_json(), entries)
         except OSError as error:  # kept in memory; the next Refresh tries again
             _log.warning("Formation Recommendations not saved: %s", error)
 
-    def _load_persisted(self, key: tuple, catalogue: Catalogue) -> bool:
+    def _load_persisted(self, key: DataKey, catalogue: Catalogue) -> bool:
         if self._store is None:
             return False
         saved = self._store.load_results()
-        if saved is None or tuple(saved[0]) != key:
+        if saved is None or list(saved[0]) != key.to_json():
             return False
         decode = Decoder(catalogue)
         try:
@@ -240,22 +194,8 @@ class Recompute:
         return True
 
 
-# Worker side: each pool process parses the snapshot once, then computes one adventure per job.
-_WORKER: tuple[Catalogue, Account, ChampionModels] | None = None
-
-
-def _init_worker(raw: RawResponses, area_sets: dict | None = None, statuses: dict | None = None) -> None:
-    """`area_sets`: the Area Set Cache the app holds (live mode keeps more sets than the snapshot brings).
-    `statuses`: champion id -> Model Status value, as validation left them."""
-    global _WORKER
-    catalogue, account = parse_catalogue(raw), parse_account(raw)
-    if area_sets is not None:
-        catalogue = replace(catalogue, area_sets=area_sets)
-    models = ChampionModels(catalogue, account, statuses={k: ModelStatus(v) for k, v in (statuses or {}).items()})
-    _WORKER = (catalogue, account, models)
-
-
-def _compute(adventure_id: int, goals: tuple[str, ...]) -> list[tuple[ResultKey, FormationRecommendation]]:
-    catalogue, account, models = _WORKER
+def compute_job(adventure_id: int, goals: tuple[str, ...]) -> list[tuple[ResultKey, FormationRecommendation]]:
+    """Worker side: every goal's recommendation for one adventure."""
+    catalogue, account, models = worker_data()
     adventure = catalogue.adventure(adventure_id)
     return [((adventure_id, goal, None), recommend(catalogue, account, adventure, goal, models=models)) for goal in goals]
