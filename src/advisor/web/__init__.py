@@ -26,8 +26,8 @@ from advisor.store import Store, load_config
 _TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
 _TEMPLATES.env.filters["sci"] = lambda x: f"{x:,.0f}" if 100 <= x < 1e6 else f"{x:.3g}" if x < 100 else f"{x:.2e}".replace("e+", "e")
 
-# Run Goals whose tab shows a Formation Recommendation so far (Push: #32, Gem Farm: #29).
-_RECOMMENDED_GOALS = ("Gold Farm",)
+# Run Goals whose tab shows a Formation Recommendation so far (Push: #32).
+_RECOMMENDED_GOALS = ("Gem Farm", "Gold Farm")
 
 
 def create_app(log_path: Path | None = None, *, live: Refresher | None = None) -> FastAPI:

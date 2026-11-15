@@ -46,6 +46,16 @@ class OwnedChampion:
 
 
 @dataclass(frozen=True)
+class ModronSave:
+    """One modron core as saved: its node grid (rows of tile ids, 0 = empty) and its reset area."""
+
+    core_id: int
+    experience: int
+    grid: tuple[tuple[int, ...], ...] = ()
+    area_goal: int | None = None
+
+
+@dataclass(frozen=True)
 class Account:
     champions: Mapping[int, OwnedChampion]  # owned champions by champion id
     completed_adventure_ids: frozenset[int] = frozenset()  # free play, variants, Running Event
@@ -56,6 +66,7 @@ class Account:
     familiar_ids: frozenset[int] = frozenset()  # familiars owned
     modron_cores: Mapping[int, int] = field(default_factory=dict)  # core id -> experience (its level)
     completed_patron_adventures: Mapping[int, object] = field(default_factory=dict)  # campaign id -> as sent
+    modron_saves: Mapping[int, ModronSave] = field(default_factory=dict)  # core id -> saved setup
     server_time: int | None = None  # the snapshot's server clock (Unix seconds), `getuserdetails.current_time`
 
     def owns(self, champion_id: int) -> bool:
@@ -124,12 +135,28 @@ def parse_account(raw: RawResponses) -> Account:
             for key, core in _entries(details.get("modron_saves"))
             if isinstance(core, dict)
         },
+        modron_saves={
+            save.core_id: save
+            for key, core in _entries(details.get("modron_saves"))
+            if isinstance(core, dict) and (save := _modron_save(key, core))
+        },
         completed_patron_adventures={
             int(c["campaign_id"]): c["completed_patron_adventure_ids"]
             for c in (raw.get("getcampaigndetails") or {}).get("campaigns") or ()
             if c.get("completed_patron_adventure_ids")
         },
         server_time=int(raw["getuserdetails"]["current_time"]) if raw["getuserdetails"].get("current_time") else None,
+    )
+
+
+def _modron_save(key, core: Mapping) -> ModronSave:
+    grid = tuple(tuple(int(t or 0) for t in row) for row in core.get("grid") or () if isinstance(row, list))
+    goal = str(core.get("area_goal") or "").strip()
+    return ModronSave(
+        core_id=int(core.get("core_id") or key),
+        experience=int(float(core.get("exp_total") or 0)),
+        grid=grid,
+        area_goal=int(goal) if goal.isdigit() and int(goal) > 0 else None,
     )
 
 
