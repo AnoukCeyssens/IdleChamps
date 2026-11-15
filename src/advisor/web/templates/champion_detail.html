@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}{{ champion.name }} · Idle Champions Advisor{% endblock %}
+{% block main %}
+<style>
+  .back a { color: var(--accent); text-decoration: none; }
+  .summary.unowned, .muted { color: var(--muted); }
+  section.detail { margin: 20px 0; }
+  section.detail h2 { font-size: 17px; margin: 0 0 8px; }
+  section.detail h3 { font-size: 15px; margin: 12px 0 4px; }
+  section.detail ul { list-style: none; padding: 0; margin: 0; }
+  section.detail li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  section.detail .name { font-weight: 600; }
+  section.detail .slot { display: inline-block; min-width: 4em; color: var(--muted); }
+  section.detail li.empty, section.detail li.feat:not(.owned) { color: var(--muted); }
+  section.detail li.chosen, section.detail li.equipped { border-left: 3px solid var(--accent); padding-left: 8px; }
+  .game-text, li .muted { margin: 2px 0 0; font-size: 14px; color: var(--muted); font-style: italic; }
+  .sep { display: none; }
+</style>
+<p class="back"><a href="/champions">← Champions</a></p>
+<h1>{{ champion.name }}</h1>
+<p class="summary {{ 'owned' if owned else 'unowned' }}">
+  {% if owned %}Level {{ owned.level }}{% else %}Not owned{% endif %}
+  · {{ champion.source.label }} · Seat {{ champion.seat }}{% if champion.role_tags %} · {{ champion.role_tags | join(", ") }}{% endif %}
+</p>
+
+{% if owned %}
+<section class="detail">
+  <h2>Gear</h2>
+  <ul class="gear">
+    {% for row in gear %}
+    <li data-row="gear-slot" class="gear-slot {{ 'empty' if not row.owned }}">
+      <span class="slot">Slot {{ row.slot }}</span>
+      {% if row.owned %}
+      <span class="name">· {{ row.item.name if row.item else "Unknown item" }}</span>
+      <span class="state">· {{ row.owned.rarity_name }}{% if row.owned.gild_name %} {{ row.owned.gild_name }}{% endif %} · Level {{ row.owned.level }}</span>
+      {% if row.item %}<p class="game-text">{{ row.item.description }}</p>
+      {% else %}<p class="muted">No item definition loaded for this slot.</p>{% endif %}
+      {% else %}
+      <span class="state">· No gear</span>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="detail">
+  <h2>Feats</h2>
+  {% if owned %}<p class="muted">{{ owned.feat_slots }} feat slots · {{ owned.feats | length }} feats owned</p>{% endif %}
+  <ul class="feats">
+    {% for row in feats %}
+    <li data-row="feat" class="feat {{ 'owned' if row.owned }} {{ 'equipped' if row.equipped }}">
+      <span class="name">{{ row.feat.name if row.feat else "Feat " ~ row.id }}</span>
+      <span class="state">· {% if row.equipped %}Equipped{% elif row.owned %}Owned{% else %}Not owned{% endif %}</span>
+      {% if row.feat %}<p class="game-text"><span class="sep"> · </span>{{ row.feat.description }}</p>
+      {% else %}<p class="muted"><span class="sep"> · </span>No feat definition loaded.</p>{% endif %}
+    </li>
+    {% else %}
+    <li class="muted">No feats {{ "owned" if owned else "known" }}.</li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="detail">
+  <h2>Specializations</h2>
+  {% for choice in spec_choices %}
+  <div data-row="spec-choice" class="spec-choice">
+    <h3>Level {{ choice.required_level }}</h3>
+    <ul class="options">
+      {% for option in choice.options %}{% set chosen = owned and option.id in owned.specialization_choices %}
+      <li data-row="spec-option" class="option {{ 'chosen' if chosen }}">
+        <span class="name">{{ option.name }}</span>{% if chosen %}<span class="badge"> · Chosen</span>{% endif %}
+        <p class="game-text"><span class="sep"> · </span>{{ option.description }}</p>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% else %}
+  <p class="muted">No specialization definitions loaded for {{ champion.name }}.</p>
+  {% endfor %}
+</section>
+{% endblock %}
