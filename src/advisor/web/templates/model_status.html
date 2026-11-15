@@ -32,6 +32,17 @@
 </section>
 
 <section class="status">
+  <h2>Push calibration flags</h2>
+  {% if calibration %}
+  <ul>
+    {% for flag in calibration %}<li data-row="calibration-flag" class="flag">{{ flag.text }}</li>{% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted" data-row="no-calibration-flags">No live run went further than its Push estimate allows.</p>
+  {% endif %}
+</section>
+
+<section class="status">
   <h2>Live damage checks</h2>
   {% if checks %}
   <ul>

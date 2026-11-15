@@ -60,12 +60,13 @@ def create_app(
     hints: dict[tuple, tuple] = {}  # "What would make this better", computed when a recommendation is opened
     ledger = model_status.from_json(store.load_model_status()) if store is not None else model_status.Ledger()
     checks: tuple[model_status.DamageCheck, ...] = ()  # the live damage checks on the shown snapshot
-    focus = focus or FocusSets()  # Next Steps' Focus Sets (#35)
+    calibration: tuple[model_status.CalibrationFlag, ...] = ()  # Push calibration flags on it (#39)
+    focus =focus or FocusSets()  # Next Steps' Focus Sets (#35)
     steps = steps or Steps()  # each Focus adventure's measured one-changes
 
     def load(responses: RawResponses, *, refreshed: bool = True) -> None:
         """(Re)build everything the pages show from raw responses (at start and after a Refresh)."""
-        nonlocal raw, catalogue, account, models, ledger, checks
+        nonlocal raw, catalogue, account, models, ledger, checks, calibration
         if "getdefinitions" not in responses or "getuserdetails" not in responses:
             return  # live mode before the first Refresh: nothing to show yet
         raw = responses
@@ -83,6 +84,7 @@ def create_app(
             except OSError:
                 pass  # kept in memory; the next Refresh saves it
         models = ChampionModels(catalogue, account, statuses=ledger.statuses())
+        calibration = model_status.push_calibration(catalogue, account, models)
         results.update(raw, catalogue, account, models, precompute=refreshed)
         hints.clear()
         steps.update(raw, account)
@@ -140,7 +142,8 @@ def create_app(
             )
         context = {
             "table": table,
-            "flags": ledger.open_flags(),
+            "flags": ledger.open_flags() + model_status.community_flags(results.held()),
+            "calibration": calibration,
             "checks": checks,
             "coverage": coverage,
             "history": history,

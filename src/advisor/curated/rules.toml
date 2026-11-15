@@ -1,0 +1,31 @@
+# Curated strategy rules (spec #22, #2, #5; research: strategy-knowledge-sources.md).
+#
+# Curated formations only seed the Formation Search and serve as a check: they never override it.
+# Every formation here is compared with the recommendation ("X% weaker by our model"), and a Gem Farm
+# one scoring more than 10% below it raises a model review flag on the Model Status page.
+#
+# Each source is a vendored snapshot pinned to a commit, parsed as data (never executed), with its
+# licence kept next to it. To refresh a source: download `path` at the new commit into `file`, diff it
+# against the old snapshot, update `commit` and `fetched`, and run the test suite.
+
+[[source]]
+id = "emmotes-forms"
+title = "Emmote's Gem Farm example formations"
+repo = "Emmotes/ic_scripting_routes"
+commit = "0fde7dff186290ba57d038dedfcf0d5bc74b8aa9"
+path = "docs/scripts/forms.js"
+file = "emmotes_ic_scripting_routes/forms.js"
+licence = "emmotes_ic_scripting_routes/LICENSE"  # MIT, Copyright (c) 2023 Emmote (@Emmotes)
+fetched = "2026-11-15"
+format = "emmotes-formsData"  # the `const formsData={...}` object literal in the JS file, read as JSON
+# Which of each entry's formations to take, and for which Run Goal.
+# Script Hub's Briv Gem Farm convention (antilectual/Idle-Champions, AddOns/IC_BrivGemFarm_Performance/
+# README.md): Q = the speed formation, with Briv and familiars on the field, used for the whole run.
+# forms.js labels it "Q (Fav: 1)"; W (stacking) and E (no Briv) are derived from it, M is the modron's.
+formation = "Q"
+run_goal = "Gem Farm"
+# Display names forms.js gives its formation types (`populateFormTypes`).
+types = { BBEG = "BBEG", melf = "Melf", dynaMinsc = "Dynaheir and Minsc", MImoHeir = "Dynaheir, Minsc and Imoen" }
+# forms.js variants: NB = without Baldric, B = with Baldric.
+variants = { NB = "", B = "with Baldric" }
+# The number under each type is how many champions sit next to Widdle (`populateFormWiddles`).

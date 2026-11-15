@@ -245,6 +245,16 @@
         </table>
         {% endif %}
         {% endif %}
+        {% if rec.comparisons %}
+        <h3>Compared with</h3>
+        <ul class="comparisons">
+          {% for c in rec.comparisons %}
+          <li data-row="comparison" class="{{ c.source }}{{ ' unavailable' if c.pct_weaker is none }}">{{ c.label }}: {{ c.verdict }}{% if c.citation %} · <a href="{{ c.citation }}" data-row="comparison-source">source</a>{% endif %}
+            {% if c.top_effects %}<ul>{% for e in c.top_effects %}<li data-row="comparison-effect">{{ e }}</li>{% endfor %}</ul>{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
         <h3>Scoring Assumptions</h3>
         <ul class="assumptions">
           {% for a in rec.scoring_assumptions %}<li data-row="assumption">{{ a }}</li>{% endfor %}

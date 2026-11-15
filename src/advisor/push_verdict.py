@@ -81,6 +81,7 @@ class PushVerdict:
     capped: bool = False  # Likely capped to Borderline (placement unknown)
     assumptions: tuple[str, ...] = ()
     placement_hint: str | None = None  # "Load <adventure> in-game, then Refresh" while placement is unknown
+    unbroken_boss: int | None = None  # the area of the boss the breaking check said can't be broken in time (#39)
 
 
 def push_verdict(
@@ -261,7 +262,8 @@ def _estimate(catalogue, account, models, adventure, patron, formation, main_dps
             )
     if patron is not None:
         assumptions.append("Patron objectives are always estimated: the best area is shared with the base adventure.")
-    return PushVerdict(kind, label, objective, best, expected, area, band, anchor, capped, tuple(assumptions))
+    return PushVerdict(kind, label, objective, best, expected, area, band, anchor, capped, tuple(assumptions),
+                       unbroken_boss=failure[0] if failure is not None else None)
 
 
 def breaking_needs(catalogue: Catalogue, adventure: Adventure, patron: int | None) -> tuple[BreakingNeed, ...]:

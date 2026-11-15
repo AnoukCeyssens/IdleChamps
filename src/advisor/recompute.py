@@ -42,7 +42,8 @@ def process_pool(initializer: Callable, initargs: tuple) -> Executor:
 def _code_fingerprint() -> str:
     """Hash of the advisor's source: results computed by other code are never reused."""
     digest = hashlib.sha256()
-    for path in sorted(Path(__file__).parent.rglob("*.py")):
+    root = Path(__file__).parent
+    for path in sorted([*root.rglob("*.py"), *(p for p in (root / "curated").rglob("*") if p.is_file())]):
         digest.update(path.read_bytes())
     return digest.hexdigest()[:16]
 
@@ -140,6 +141,12 @@ class Recompute:
         with self._lock:
             self._fresh[(adventure.id, goal, patron)] = result
             self._old.pop((adventure.id, goal, patron), None)
+
+    def held(self) -> tuple[FormationRecommendation, ...]:
+        """Every recommendation computed for the current data so far (all of them once a recompute
+        finished; offline, the ones opened). The Model Status page reads their comparisons (#39)."""
+        with self._lock:
+            return tuple(self._fresh.values())
 
     def progress(self) -> Progress:
         with self._lock:
