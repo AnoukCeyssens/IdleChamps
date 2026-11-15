@@ -25,7 +25,7 @@ from pathlib import Path
 from advisor import area_sets
 from advisor.account import Account, parse_account
 from advisor.catalogue import Adventure, Catalogue, parse_catalogue
-from advisor.champion_models import ChampionModels
+from advisor.champion_models import ChampionModels, ModelStatus
 from advisor.recommendation import FormationRecommendation, recommend
 from advisor.request_log import RawResponses
 from advisor.results_codec import Decoder, Encoder
@@ -53,6 +53,12 @@ CODE = _code_fingerprint()
 def _area_sets_key(catalogue: Catalogue) -> str:
     """Fingerprint of the Area Set Cache: a set learnt or overwritten changes Push verdicts."""
     data = json.dumps(area_sets.to_json(catalogue.area_sets), sort_keys=True)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()[:16]
+
+
+def _statuses_key(models: ChampionModels) -> str:
+    """Fingerprint of the Model Statuses validation gave the reconstructed champions."""
+    data = json.dumps({str(k): v.value for k, v in models.statuses.items()}, sort_keys=True)
     return hashlib.sha256(data.encode("utf-8")).hexdigest()[:16]
 
 
@@ -88,6 +94,7 @@ class Recompute:
         """New data loaded. `precompute`: start a recompute if the results for it are missing
         (after a Refresh); otherwise only reuse what the Store holds (at start)."""
         key = (account.recommendation_key, str(raw["getdefinitions"].get("checksum")), CODE, _area_sets_key(catalogue))
+        key += (_statuses_key(models),)  # Model Status changes badges and Push bands (#38)
         with self._update_lock:
             with self._lock:
                 self._inputs = (catalogue, account, models)
@@ -152,7 +159,8 @@ class Recompute:
             with self._lock:
                 self._old, self._complete = {}, True
             return
-        pool = self._executor_factory(_init_worker, (dict(raw), dict(catalogue.area_sets)))
+        statuses = {k: v.value for k, v in self._inputs[2].statuses.items()} if self._inputs else {}
+        pool = self._executor_factory(_init_worker, (dict(raw), dict(catalogue.area_sets), statuses))
         with self._lock:
             self._pool, self._done, self._total = pool, 0, len(adventures)
         for adventure_id in adventures:
@@ -219,13 +227,15 @@ class Recompute:
 _WORKER: tuple[Catalogue, Account, ChampionModels] | None = None
 
 
-def _init_worker(raw: RawResponses, area_sets: dict | None = None) -> None:
-    """`area_sets`: the Area Set Cache the app holds (live mode keeps more sets than the snapshot brings)."""
+def _init_worker(raw: RawResponses, area_sets: dict | None = None, statuses: dict | None = None) -> None:
+    """`area_sets`: the Area Set Cache the app holds (live mode keeps more sets than the snapshot brings).
+    `statuses`: champion id -> Model Status value, as validation left them."""
     global _WORKER
     catalogue, account = parse_catalogue(raw), parse_account(raw)
     if area_sets is not None:
         catalogue = replace(catalogue, area_sets=area_sets)
-    _WORKER = (catalogue, account, ChampionModels(catalogue, account))
+    models = ChampionModels(catalogue, account, statuses={k: ModelStatus(v) for k, v in (statuses or {}).items()})
+    _WORKER = (catalogue, account, models)
 
 
 def _compute(adventure_id: int, goals: tuple[str, ...]) -> list[tuple[ResultKey, FormationRecommendation]]:

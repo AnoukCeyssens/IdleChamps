@@ -11,6 +11,8 @@ field, each file written atomically (temp file + rename):
   version it was last seen under); grows with every Refresh, never expires (`advisor.area_sets`).
 - `results.json.gz`: the precomputed Formation Recommendations (`recompute.py`), with the key
   they were computed for (recommendation key, definitions checksum, code fingerprint).
+- `model_status.json.gz`: the Model Status ledger (`advisor.model_status`): each reconstructed
+  champion's status and evidence, the model review flags, the damage checks already counted.
 - `history.jsonl.gz`: append-only History Records, one JSON line each (one gzip member per
   record), each line with its own version field.
 - `config.toml`: configurable values (written by hand; there is no settings page).
@@ -105,6 +107,18 @@ class Store:
 
     def save_area_sets(self, cache: Mapping) -> None:
         self._write("area_sets.json.gz", area_sets.to_json(cache))
+
+    def load_model_status(self) -> dict | None:
+        """The Model Status ledger as `advisor.model_status.to_json` wrote it (versioned there), or None."""
+        path = self.folder / "model_status.json.gz"
+        try:
+            data = json.loads(gzip.decompress(path.read_bytes()))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def save_model_status(self, data: dict) -> None:
+        self._write("model_status.json.gz", data)
 
     def load_results(self) -> tuple[list, list] | None:
         """(key, entries) as `save_results` wrote them, or None."""

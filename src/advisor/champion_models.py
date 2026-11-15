@@ -5,7 +5,7 @@ The one place that knows what champions do. Formation Search only sees this inte
 - `ChampionModels(catalogue, account)`
   - `loadouts(champion_id)`: the specialization and feat choices the search may pick between.
   - `scorer(layout, run_goal, main_dps)`: a `Scorer` for formations built around that Main DPS seat.
-  - `status(champion_id)`: the champion's Model Status.
+  - `status(champion_id)`: the champion's Model Status (Not Modelled unless listed in `RECONSTRUCTIONS`).
   - `assumptions(run_goal)`: the Scoring Assumptions every score for that goal rests on.
 - `Scorer.score(seats)`: the formation's `FormationScore` (log score, BUD, each seat's contribution).
 - `Scorer.bound(seat)`: an optimistic log weight for one seat, never below what that seat adds to any
@@ -106,6 +106,18 @@ class ModelStatus(enum.Enum):
 
 
 @dataclass(frozen=True)
+class Reconstruction:
+    """A champion's hand-built model of its unique effects (#40). `description_tests`: the test ids
+    that check it against the champion's description; the suite keeps them passing."""
+
+    description_tests: tuple[str, ...] = ()
+
+
+# Champion id -> its reconstruction. Champions not listed are Not Modelled (generic effects only).
+RECONSTRUCTIONS: dict[int, Reconstruction] = {}
+
+
+@dataclass(frozen=True)
 class Loadout:
     """The choices the player makes per champion: specialization option ids and equipped feat ids."""
 
@@ -179,11 +191,17 @@ _TARGETS = {
 
 
 class ChampionModels:
-    def __init__(self, catalogue: Catalogue, account: Account, *, potions: Sequence[str] = ()) -> None:
-        """`potions`: effect strings of potions in use. Only hints pass any (#34); the baseline has none."""
+    def __init__(
+        self, catalogue: Catalogue, account: Account, *, potions: Sequence[str] = (),
+        statuses: Mapping[int, ModelStatus] | None = None,
+    ) -> None:
+        """`potions`: effect strings of potions in use. Only hints pass any (#34); the baseline has none.
+        `statuses`: the Model Status of each reconstructed champion, as validation left it
+        (`advisor.model_status`); a reconstructed champion missing from it counts as Stale."""
         self.catalogue = catalogue
         self.account = account
         self.potions = tuple(potions)
+        self.statuses = dict(statuses or {})
         self._effects = cache(self._build_effects)
         self._break_effects = cache(self._build_break_effects)
         self.break_ceiling = cache(self._build_break_ceiling)
@@ -192,8 +210,13 @@ class ChampionModels:
     # --- interface ---------------------------------------------------------------------------
 
     def status(self, champion_id: int) -> ModelStatus:
-        """No per-champion reconstruction or validation exists yet (#38, #40)."""
-        return ModelStatus.NOT_MODELLED
+        """Not Modelled unless the champion has a reconstruction; then what validation says."""
+        if champion_id not in RECONSTRUCTIONS:
+            return ModelStatus.NOT_MODELLED
+        return self.statuses.get(champion_id, ModelStatus.STALE)
+
+    def reconstruction(self, champion_id: int) -> Reconstruction | None:
+        return RECONSTRUCTIONS.get(champion_id)
 
     def loadouts(self, champion_id: int) -> tuple[Loadout, ...]:
         """Every specialization combination × every useful feat set. Feats are only chosen among owned
