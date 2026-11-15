@@ -17,7 +17,7 @@ def test_refresh_writes_gzipped_versioned_json(live):
     live.start()
 
     files = _persisted(live)
-    assert set(files) == {"definitions.json.gz", "snapshot.json.gz", "history.jsonl.gz"}
+    assert set(files) == {"definitions.json.gz", "snapshot.json.gz", "history.jsonl.gz", "area_sets.json.gz"}
     for data in files.values():
         for line in gzip.decompress(data).decode("utf-8").splitlines():  # history: one JSON per line
             assert json.loads(line)["version"] == 1

@@ -7,6 +7,8 @@ field, each file written atomically (temp file + rename):
   delta a Refresh brings.
 - `snapshot.json.gz`: the latest credential-stripped Player Snapshot subset (the Refresh's
   responses minus definitions, shop/promo and server stats).
+- `area_sets.json.gz`: the Area Set Cache (monster placement per `area_set_id`, each with the game
+  version it was last seen under); grows with every Refresh, never expires (`advisor.area_sets`).
 - `history.jsonl.gz`: append-only History Records, one JSON line each (one gzip member per
   record), each line with its own version field.
 - `config.toml`: configurable values (written by hand; there is no settings page).
@@ -26,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from advisor import area_sets
 from advisor.request_log import strip_credentials
 
 DEFINITIONS_VERSION = 1
@@ -92,6 +95,13 @@ class Store:
             "snapshot.json.gz",
             {"version": SNAPSHOT_VERSION, "refreshed_at": snapshot.refreshed_at, "responses": responses},
         )
+
+    def load_area_sets(self) -> dict:
+        """The Area Set Cache (`area_sets.json.gz`): `area_set_id` -> `advisor.area_sets.AreaSet`."""
+        return area_sets.from_json(self._read("area_sets.json.gz", area_sets.AREA_SETS_VERSION))
+
+    def save_area_sets(self, cache: Mapping) -> None:
+        self._write("area_sets.json.gz", area_sets.to_json(cache))
 
     def append_history(self, record: Mapping[str, Any]) -> None:
         """Add one History Record. The file is rewritten atomically, so a crash never leaves a

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from advisor.account import Account
 from advisor.catalogue import Adventure, Catalogue, Champion, Feat, Patron, Restriction, SpecializationOption
-from advisor.champion_models import ChampionModels, Contribution, ModelStatus, Seat
+from advisor.champion_models import BREAK_TIME_S, ChampionModels, Contribution, ModelStatus, Seat
 from advisor.formation_search import EXACT_TIME_LIMIT_S, Candidate, SearchProblem, exact_search, exhaustive_search, search
 from advisor.push_verdict import PushVerdict, breaking_needs, push_verdict
 from advisor.restrictions import describe, failed
@@ -139,15 +139,37 @@ def recommend(
 
     needs = breaking_needs(catalogue, adventure, patron) if run_goal == "Push" else ()
 
-    def scorer_for(main):
+    def plain_scorer(main):
+        return models.scorer(adventure.layout, run_goal, main)
+
+    def breaking_scorer(main):
         return models.scorer(adventure.layout, run_goal, main, breaking=needs)
 
-    result = (exhaustive_search if solver == "exhaustive" else _fast(budget_s))(problem, scorer_for)
+    def breaks_all(found) -> bool:
+        scorer = breaking_scorer(found.main_dps)
+        return all(scorer.breaking_rate(found.seats, n.kind) * BREAK_TIME_S >= n.segments for n in needs)
+
+    # Breaking (Push): the best damage-only formation is also the best overall when it breaks every
+    # boss in time (its breaking penalty is 0), and its gap stays tight. Only otherwise does the search
+    # run again with the penalty, whose bounds are looser.
+    def run(solve):
+        found = solve(problem, plain_scorer)
+        if found is not None and needs and not breaks_all(found):
+            found = solve(problem, breaking_scorer)
+        return found
+
+    result = run(exhaustive_search if solver == "exhaustive" else _fast(budget_s))
     exact_solve = None
     if solver == "exact" and result is not None:
         fast = result
+        scorer_for = breaking_scorer if needs and not breaks_all(fast) else plain_scorer
         result = exact_search(problem, scorer_for, exact_time_s, incumbent=fast)
+        if scorer_for is plain_scorer and needs and not breaks_all(result):
+            incumbent = _fast(budget_s)(problem, breaking_scorer)
+            result = exact_search(problem, breaking_scorer, exact_time_s, incumbent=incumbent)
         exact_solve = "improved" if result.exact else "proven" if result.gap_pct == 0 else "timed_out"
+    if result is not None:
+        scorer_for = breaking_scorer if needs and not breaks_all(result) else plain_scorer
     if result is None:
         return infeasible("No legal formation: the champions this adventure forces in don't fit its free slots.", left_out)
 

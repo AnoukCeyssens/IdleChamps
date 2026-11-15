@@ -407,7 +407,8 @@ class Scorer:
     def _breaking_bound(self, seat: Seat) -> float:
         """Most a seat can lift the breaking penalty. Each need's term is min(0, log rate), and adding a
         seat multiplies the rate by at most (1 + its own hits at the best possible extras and
-        multipliers ÷ the Main DPS's bare hits) × (1 + each extra it gives) × (each multiplier it gives)."""
+        multipliers ÷ the Main DPS's bare hits) × (1 + each extra it gives) × (each multiplier it gives),
+        and never by more than the Main DPS alone falls short."""
         if not self.breaking:
             return 0.0
         floor = self.models.hit_rates(self.main_dps.champion_id)[0]
@@ -420,7 +421,10 @@ class Scorer:
             for e in self.models.break_effects(seat.champion_id, seat.loadout):
                 if need.kind in e.kinds:
                     log_gain += math.log1p(e.amount) if e.op == "extra" else math.log1p(e.amount / 100)
-            total += BREAKING_WEIGHT * log_gain
+            # Seats only ever raise the rate, so no seat lifts more than the Main DPS alone is missing.
+            alone = self.breaking_rate((), need.kind)
+            missing = -min(0.0, math.log(alone * BREAK_TIME_S / need.segments)) if alone > 0 else math.inf
+            total += BREAKING_WEIGHT * min(log_gain, missing)
         return total
 
     def _reach(self, seat: Seat) -> tuple[float, float]:
