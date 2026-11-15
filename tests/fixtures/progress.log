@@ -1,0 +1,6 @@
+**************************************************
+call=getcampaigndetails
+{"success": true, "reset_details": {"adventure_id": 2036}, "campaigns": [{"campaign_id": "1", "visible_path_ids": [], "visible_location_ids": [], "available_adventure_ids": [7, 9, 413], "locked_adventure_ids": [], "completed_adventure_ids": [7, 413], "available_patron_adventure_ids": [], "completed_patron_adventure_ids": [], "adventure_difficulties": [], "adventure_conditions": [], "adventure_persistent_data": [], "reset_currency": "1.5e12"}, {"campaign_id": "5", "visible_path_ids": [], "visible_location_ids": [], "available_adventure_ids": [2036, 2037, 2038, 2039, 2040], "locked_adventure_ids": [], "completed_adventure_ids": [2036, 2037], "adventure_difficulties": {"2036": 0}, "adventure_conditions": {}, "adventure_persistent_data": [], "reset_currency": 0}]}
+**************************************************
+call=getcompletiondata
+{"success": true, "data": {"event": {"180": {"v": [[1, 1, 1], [1, 1, 0], [0, 0, 0], [0, 0, 0]]}, "51": {"v": [[1, 1, 1], [1, 1, 1], [1, 1, 1], [0, 0, 0]]}}}}

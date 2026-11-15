@@ -2,9 +2,9 @@
 
 It is a Game Client transport (`get(url, timeout) -> dict`), so the real live client runs
 against it unchanged. Defaults come from the recorded fixture log; the calls the fixture
-doesn't hold (`getcampaigndetails`, `getpatrondetails`, `geteventsdetails`,
-`getcompletiondata`) get small credential-free bodies in the shapes documented in the
-game-API research. Credentials are planted (fake values) where the real game puts them, so
+doesn't hold come from the hand-built `progress.log` (`getcampaigndetails`,
+`getcompletiondata`) or are small credential-free bodies in the shapes documented in the
+game-API research (`getpatrondetails`, `geteventsdetails`). Credentials are planted (fake values) where the real game puts them, so
 tests can prove none of them is ever persisted.
 """
 
@@ -31,6 +31,7 @@ PLAY_SERVER = "https://pslt1.idlechampions.com/~idledragons/"
 SECRETS = (USER_ID, HASH, INSTANCE_ID)
 
 _RECORDED = read_responses(FIXTURE_LOG)
+_PROGRESS = read_responses(FIXTURE_LOG.parent / "progress.log")  # hand-built, credential-free
 
 
 def write_request_log(path: Path, *, user_id: str = USER_ID, hash: str = HASH) -> Path:
@@ -74,10 +75,10 @@ def _definitions_for(params: dict[str, str]) -> dict:
 DEFAULTS = {
     "getplayserverfordefinitions": lambda: copy.deepcopy(_RECORDED["getplayserverfordefinitions"]),
     "getuserdetails": user_details,
-    "getcampaigndetails": lambda: {"success": True, "campaigns": [{"campaign_id": 1, "user_id": USER_ID}]},
+    "getcampaigndetails": lambda: copy.deepcopy(_PROGRESS["getcampaigndetails"]),
     "getpatrondetails": lambda: {"success": True, "patrons": [{"patron_id": 1, "unlocked": True}]},
     "geteventsdetails": lambda: {"success": True, "events_details": {"active_events": []}},
-    "getcompletiondata": lambda: {"success": True, "data": {"event": {}}},
+    "getcompletiondata": lambda: copy.deepcopy(_PROGRESS["getcompletiondata"]),
 }
 
 

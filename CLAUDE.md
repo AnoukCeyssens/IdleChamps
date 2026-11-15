@@ -13,9 +13,11 @@ Python 3.13+ via `uv` (FastAPI + Jinja + htmx, no JS build step). Code lives in 
 
 Test seam (spec #22): drive the app through the `client` fixture in `tests/conftest.py` (FastAPI `TestClient` over `create_app(FIXTURE_LOG)`) and assert on what the page shows. Mark repeated things in templates with `data-row="<kind>"` and read them with `rows(page, kind)`. Expected values come from the real fixture data (e.g. 168 champions, Bruenor at level 300), not from re-running the parser.
 
+Responses missing from the recording (`getcampaigndetails`, `getcompletiondata`) live in the small hand-built `tests/fixtures/progress.log`; `tests/test_explorer.py` merges it over the recording (`read_responses(a) | read_responses(b)` → `write_responses`).
+
 Live mode is tested through the `live` fixture: the app on a temp data folder talking to `tests/fake_game.py`'s `FakeGameServer` (a transport replaying recorded responses; queue one-shot responses or failures with `server.queue(call, ...)`), with a fake clock. Never a real network call.
 
-Layout: `game_client.py` (offline and live clients, read-only call allow-list, the only network code), `refresh.py` (Refresher: one Refresh at a time, cooldown, failure cause/fix), `store.py` (app data folder, atomic gzipped versioned JSON, config), `request_log.py` (log format, credential stripping), `catalogue.py` / `account.py` (typed domain objects parsed from raw responses), `web/` (`create_app`, templates; display only), `cli.py`, `fixtures.py`.
+Layout: `game_client.py` (offline and live clients, read-only call allow-list, the only network code), `refresh.py` (Refresher: one Refresh at a time, cooldown, failure cause/fix), `store.py` (app data folder, atomic gzipped versioned JSON, config), `request_log.py` (log format, credential stripping), `catalogue.py` / `account.py` (typed domain objects parsed from raw responses), `explorer.py` (Formation view tree and completion badges), `web/` (`create_app`, templates; display only), `cli.py`, `fixtures.py`.
 
 ## Agent skills
 

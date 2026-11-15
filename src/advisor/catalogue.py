@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections import defaultdict
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 from advisor.request_log import RawResponses
 
@@ -42,11 +44,128 @@ class Champion:
 
 
 @dataclass(frozen=True)
+class Campaign:
+    """A free play campaign, or an event (an event's adventures form a campaign of their own)."""
+
+    id: int
+    name: str
+    event_id: int | None = None  # set on event campaigns
+
+    @property
+    def is_event(self) -> bool:
+        return self.event_id is not None
+
+
+@dataclass(frozen=True)
+class Slot:
+    """One seat of a formation layout. Column 0 is the front (nearest the enemies)."""
+
+    index: int
+    x: int
+    y: int
+    column: int
+    adjacent: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class Adventure:
+    id: int
+    name: str
+    campaign_id: int
+    base_id: int | None  # the base adventure of a variant (`variant_adventure_id`)
+    objective_area: int | None  # None for free play
+    restrictions_text: str
+    patron_objectives: Mapping[int, int]  # patron id -> objective area
+    layout: tuple[Slot, ...]
+    blocked_slots: frozenset[int]  # seats taken by an escort
+    champion_id: int | None = None  # the event champion whose adventure this is, if any
+
+    @property
+    def is_variant(self) -> bool:
+        return self.base_id is not None
+
+
+@dataclass(frozen=True)
+class Patron:
+    id: int
+    name: str
+
+
+@dataclass(frozen=True)
+class SpecializationOption:
+    id: int  # the upgrade id the Player Snapshot records when it is chosen
+    name: str
+    description: str
+
+
+@dataclass(frozen=True)
+class SpecializationChoice:
+    """One point where the game asks the player to pick a specialization."""
+
+    required_level: int
+    options: tuple[SpecializationOption, ...]  # in upgrade id order
+
+
+GEAR_SLOTS = (1, 2, 3, 4, 5, 6)
+
+
+@dataclass(frozen=True)
+class GearItem:
+    """The game's item for one champion's gear slot at one rarity."""
+
+    champion_id: int
+    slot: int
+    rarity: int  # 1 Common, 2 Uncommon, 3 Rare, 4 Epic
+    name: str
+    description: str
+
+
+@dataclass(frozen=True)
+class Feat:
+    id: int
+    champion_id: int
+    name: str
+    description: str
+
+
+@dataclass(frozen=True)
 class Catalogue:
     champions: tuple[Champion, ...]  # ordered by seat, then id
+    campaigns: tuple[Campaign, ...] = ()
+    adventures: tuple[Adventure, ...] = ()  # ordered by id
+    patrons: Mapping[int, Patron] = field(default_factory=dict)
+    # The champion's specialization choice points by champion id, ordered by required level.
+    # Only champions whose upgrade definitions have been loaded appear.
+    specializations: Mapping[int, tuple[SpecializationChoice, ...]] = field(default_factory=dict)
+    # Gear items by (champion id, slot, rarity); only those whose loot definitions have been loaded.
+    gear: Mapping[tuple[int, int, int], GearItem] = field(default_factory=dict)
+
+    # Feats by id; only those whose feat definitions have been loaded.
+    feats: Mapping[int, Feat] = field(default_factory=dict)
+
+    def gear_item(self, champion_id: int, slot: int, rarity: int) -> GearItem | None:
+        return self.gear.get((champion_id, slot, rarity))
+
+    def feats_of(self, champion_id: int) -> tuple[Feat, ...]:
+        return tuple(sorted((f for f in self.feats.values() if f.champion_id == champion_id), key=lambda f: f.id))
 
     def champion(self, champion_id: int) -> Champion:
         return next(c for c in self.champions if c.id == champion_id)
+
+    def adventure(self, adventure_id: int) -> Adventure | None:
+        return next((a for a in self.adventures if a.id == adventure_id), None)
+
+    def campaign(self, campaign_id: int) -> Campaign:
+        found = next((c for c in self.campaigns if c.id == campaign_id), None)
+        return found or Campaign(campaign_id, f"Campaign {campaign_id}")
+
+    def variants_of(self, adventure_id: int) -> tuple[Adventure, ...]:
+        return tuple(a for a in self.adventures if a.base_id == adventure_id)
+
+    def patron(self, patron_id: int) -> Patron:
+        return self.patrons.get(patron_id) or Patron(patron_id, f"Patron {patron_id}")
+    def find(self, champion_id: int) -> Champion | None:
+        return next((c for c in self.champions if c.id == champion_id), None)
 
 
 def parse_catalogue(raw: RawResponses) -> Catalogue:
@@ -55,7 +174,188 @@ def parse_catalogue(raw: RawResponses) -> Catalogue:
         for h in raw["getdefinitions"]["hero_defines"]
         if h.get("seat_id")  # seat 0 marks the game's "Please Reload" placeholders
     ]
-    return Catalogue(champions=tuple(sorted(champions, key=lambda c: (c.seat, c.id))))
+    campaign_defines = _table(raw, "campaign_defines")
+    adventure_defines = {int(a["id"]): a for a in _table(raw, "adventure_defines")}
+    campaign_layouts = {int(c["id"]): _layout(c.get("game_changes")) for c in campaign_defines}
+    champion_of = {
+        int(ref["adventure_id"]): int(h["id"])
+        for h in raw["getdefinitions"]["hero_defines"]
+        for ref in h.get("adventure_ids") or ()
+        if h.get("event_name")
+    }
+    return Catalogue(
+        champions=tuple(sorted(champions, key=lambda c: (c.seat, c.id))),
+        specializations=_specializations(_table(raw, "upgrade_defines")),
+        gear=_gear(_table(raw, "loot_defines")),
+        feats=_feats(_table(raw, "hero_feat_defines")),
+        campaigns=tuple(sorted(map(_campaign, campaign_defines), key=lambda c: c.id)),
+        adventures=tuple(
+            _adventure(a, adventure_defines, campaign_layouts, champion_of)
+            for _, a in sorted(adventure_defines.items())
+        ),
+        patrons={**_PATRON_NAMES, **{p.id: p for p in map(_patron, _table(raw, "patron_defines"))}},
+    )
+
+
+# Patron names, used when `patron_defines` isn't among the recorded definitions.
+_PATRON_NAMES = {
+    i: Patron(i, name) for i, name in enumerate(("Mirt", "Vajra", "Strahd", "Zariel", "Elminster"), 1)
+}
+
+def _campaign(define: dict) -> Campaign:
+    properties = define.get("properties") or {}
+    event_id = properties.get("event_id") if properties.get("is_event") else None
+    return Campaign(
+        id=int(define["id"]),
+        name=define["name"],
+        event_id=int(event_id) if event_id is not None else None,
+    )
+
+
+def _patron(define: dict) -> Patron:
+    return Patron(id=int(define["id"]), name=define["name"])
+
+
+def _adventure(
+    define: dict,
+    all_defines: Mapping[int, dict],
+    campaign_layouts: Mapping[int, tuple[Slot, ...]],
+    champion_of: Mapping[int, int],
+) -> Adventure:
+    adventure_id = int(define["id"])
+    base_id = int(define["variant_adventure_id"]) if define.get("variant_adventure_id") else None
+    campaign_id = int(define["campaign_id"])
+    # The adventure's own layout overrides its base adventure's, which overrides the campaign's.
+    layout = (
+        _layout(define.get("game_changes"))
+        or (_layout(all_defines[base_id].get("game_changes")) if base_id in all_defines else ())
+        or campaign_layouts.get(campaign_id, ())
+    )
+    return Adventure(
+        id=adventure_id,
+        name=define["name"],
+        campaign_id=campaign_id,
+        base_id=base_id,
+        objective_area=_objective_area(define.get("objectives")),
+        restrictions_text=_plain_text(define.get("restrictions_text")),
+        patron_objectives={
+            int(patron_id): area
+            for patron_id, tiers in sorted((define.get("patron_objectives") or {}).items())
+            if (area := _objective_area(next(iter(tiers.values()), None) if tiers else None))
+        },
+        layout=layout,
+        blocked_slots=_blocked_slots(define.get("game_changes")),
+        champion_id=champion_of.get(adventure_id) or champion_of.get(base_id),
+    )
+
+
+_MARKUP = re.compile(r"<[^>]*>")
+
+
+def _plain_text(text: str | None) -> str:
+    """Game text without its rich-text tags, one line per paragraph."""
+    lines = _MARKUP.sub("", text or "").replace("\r\n", "\n").split("\n")
+    return "\n".join(line.strip() for line in lines if line.strip())
+
+
+def _objective_area(objectives: list | None) -> int | None:
+    areas = [int(o["area"]) for o in objectives or () if o.get("condition") == "complete_area"]
+    return max(areas) if areas else None
+
+
+def _layout(game_changes: list | None) -> tuple[Slot, ...]:
+    formation = next((g["formation"] for g in game_changes or () if g.get("type") == "formation"), None)
+    return tuple(
+        Slot(
+            index=i,
+            x=int(s["x"]),
+            y=int(s["y"]),
+            column=int(s.get("col", 0)),
+            adjacent=tuple(int(j) for j in s.get("adj") or ()),
+        )
+        for i, s in enumerate(formation or ())
+    )
+
+
+def _blocked_slots(game_changes: list | None) -> frozenset[int]:
+    """Seats an escort occupies. Escorts that arrive by area are treated as always there."""
+    blocked: set[int] = set()
+    for change in game_changes or ():
+        if change.get("type") == "slot_escort":
+            blocked.update([change["slot_id"]] if "slot_id" in change else change.get("slot_ids") or ())
+        elif change.get("type") == "slot_escort_by_area":
+            for escort in change.get("escorts") or ():
+                blocked.update(escort.get("slot_ids") or ())
+    return frozenset(int(i) for i in blocked)
+
+
+def _feats(rows: list[dict]) -> dict[int, Feat]:
+    return {
+        int(row["id"]): Feat(
+            id=int(row["id"]),
+            champion_id=int(row["hero_id"]),
+            name=row.get("name") or "",
+            description=row.get("description") or "",
+        )
+        for row in rows
+        if row.get("hero_id")
+    }
+
+
+def _gear(loot: list[dict]) -> dict[tuple[int, int, int], GearItem]:
+    items = (
+        GearItem(
+            champion_id=int(row["hero_id"]),
+            slot=int(row["slot_id"]),
+            rarity=int(row["rarity"]),
+            name=row.get("name") or "",
+            description=row.get("description") or "",
+        )
+        for row in loot
+        if row.get("hero_id") and row.get("slot_id") and row.get("rarity")
+    )
+    return {(i.champion_id, i.slot, i.rarity): i for i in items}
+
+
+def _table(raw: RawResponses, name: str) -> list[dict]:
+    """Every row of one Game Definitions table, wherever the loaded responses carry it.
+
+    A table can come whole (`upgrade_defines`) or sharded (`upgrade_defines_0`, `_1`, ...) in
+    `getdefinitions`, and subsets ride along in `getuserdetails.defines` and
+    `getcampaigndetails.defines`. Rows are merged by
+    id; `getdefinitions` wins over the embedded subset.
+    """
+    shard = re.compile(rf"{re.escape(name)}(_\d+)?")
+    sources = [
+        (raw.get("getuserdetails") or {}).get("defines") or {},
+        (raw.get("getcampaigndetails") or {}).get("defines") or {},
+        raw.get("getdefinitions") or {},
+    ]
+    merged: dict = {}
+    for source in sources:
+        for key, rows in source.items():
+            if shard.fullmatch(key) and isinstance(rows, list):
+                merged.update({row["id"]: row for row in rows if isinstance(row, dict) and "id" in row})
+    return list(merged.values())
+
+
+def _specializations(upgrades: list[dict]) -> dict[int, tuple[SpecializationChoice, ...]]:
+    points: dict[tuple[int, int, int], list[SpecializationOption]] = defaultdict(list)
+    for u in sorted(upgrades, key=lambda u: int(u["id"])):
+        if not u.get("specialization_name"):
+            continue
+        key = (int(u["hero_id"]), int(u.get("required_level") or 0), int(u.get("required_upgrade_id") or 0))
+        points[key].append(
+            SpecializationOption(
+                id=int(u["id"]),
+                name=u["specialization_name"],
+                description=u.get("specialization_description") or "",
+            )
+        )
+    by_champion: dict[int, list[SpecializationChoice]] = defaultdict(list)
+    for (hero_id, level, _), options in sorted(points.items()):
+        by_champion[hero_id].append(SpecializationChoice(required_level=level, options=tuple(options)))
+    return {hero_id: tuple(choices) for hero_id, choices in by_champion.items()}
 
 
 def _champion(hero: dict) -> Champion:

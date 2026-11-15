@@ -281,6 +281,17 @@ def test_startup_refresh_runs_in_the_background_and_the_header_reloads_the_page_
     assert len(rows(client.get("/champions").text, "champion")) == 168
 
 
+def test_every_page_carries_the_header_in_live_mode(live):
+    empty = live.start(background=lambda job: None)  # before any Refresh: nothing cached
+    assert empty.get("/adventures").status_code == 200
+
+    client = live.start()
+    for path in ("/champions", "/champions/1", "/adventures"):
+        page = client.get(path)
+        assert page.status_code == 200, path
+        assert rows(page.text, "refresh-state")[0]["text"].startswith("refreshed"), path
+
+
 def test_offline_mode_header_has_no_refresh(client):
     page = client.get("/champions").text
 
