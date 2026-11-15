@@ -94,11 +94,6 @@ class _Effect:
 _DAMAGE_KEYS = {"hero_dps_multiplier_mult": "self", "global_dps_multiplier_mult": "all"}
 _GOLD_KEYS = {"gold_multiplier_mult"}
 _BUFF_KEYS = {"buff_upgrade", "buff_upgrades"}
-# Generic keys that change neither damage nor gold (health, ultimate timing, display).
-_NEUTRAL_KEYS = {
-    "health_mult", "health_add", "reduce_ultimate_cooldown", "increase_ultimate_cooldown",
-    "buff_ultimate", "set_ultimate_attack", "do_nothing",
-}
 # Effect-key fields that make an effect more than plain data (expressions, stacks, triggers, filters).
 _COMPLEX_FIELDS = {
     "amount_expr", "per_hero_expr", "post_process_expr", "stack_func", "stacks_on_trigger", "more_triggers",

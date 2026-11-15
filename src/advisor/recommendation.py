@@ -179,7 +179,9 @@ def recommend(
             taken = holder[champion.seat]
             mine = max(scorer.bound(Seat(c.champion_id, taken.slot, l)) for l in c.loadouts)
             name = catalogue.champion(taken.champion_id).name
-            if scorer.bound(taken) > mine + 1e-9 or taken == result.main_dps:
+            if by_id[taken.champion_id].forced:
+                reason = f"seat {champion.seat} taken by {name}, whom the adventure puts in the formation"
+            elif scorer.bound(taken) > mine + 1e-9 or taken == result.main_dps:
                 reason = f"seat {champion.seat} taken by {name}, a better pick"
             elif _level(account, taken.champion_id) > _level(account, c.champion_id):
                 reason = f"seat {champion.seat} taken by {name} (same score, higher level)"

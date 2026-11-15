@@ -8,7 +8,6 @@ upgrades linking abilities with `effect_def,<id>`).
 
 from __future__ import annotations
 
-import math
 from dataclasses import replace
 
 import pytest
@@ -19,7 +18,6 @@ from advisor.recommendation import recommend
 from advisor.request_log import read_responses
 from conftest import FIXTURE_LOG
 
-KAS, BRUENOR, CELESTE, SPURT, CALLIPE, JARLAXLE = 153, 1, 2, 43, 5, 4
 
 
 @pytest.fixture(scope="module")
@@ -97,6 +95,8 @@ def test_forced_champion_sits_in_its_forced_slot(catalogue, account):
     turiel = next(s for s in rec.seats if s.slot == 1)
     assert turiel.champion.name == "Turiel"
     assert turiel.provided_by_adventure  # not owned: the adventure lends him
+    reasons = {left.champion.name: left.reason for left in rec.left_out}
+    assert reasons["Bruenor"] == "seat 1 taken by Turiel, whom the adventure puts in the formation"
 
 
 def test_escort_blocked_slots_stay_empty_and_marked(catalogue, account):

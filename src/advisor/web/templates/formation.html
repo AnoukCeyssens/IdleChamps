@@ -39,6 +39,21 @@
   .tabs a { padding: 6px 14px; border-bottom: 2px solid transparent; color: var(--fg); text-decoration: none; }
   .tabs a.on { border-color: var(--accent); font-weight: 600; }
   .grid-panel { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center; }
+  .recommendation { display: grid; grid-template-columns: 1fr 300px; gap: 16px; margin-top: 14px; align-items: start; }
+  .main-dps { font-size: 16px; margin: 0 0 10px; }
+  .infeasible { padding: 10px 12px; border: 1px solid #e67700; border-radius: 6px; color: #b35c00; background: #fff8ef; }
+  table.seats { width: 100%; border-collapse: collapse; font-size: 13px; background: #fff; }
+  table.seats th, table.seats td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+  table.seats tr.main-dps { background: #e8ecfb; }
+  table.seats tr.blocked, table.seats tr.empty { color: var(--muted); }
+  .rail { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 12px; font-size: 13px; }
+  .rail h3 { font-size: 13px; margin: 12px 0 4px; }
+  .rail ul { margin: 0; padding-left: 18px; }
+  .rail .score { font-size: 18px; font-weight: 600; margin: 0; }
+  .rail .score .unit { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
+  .rail .gap { margin: 2px 0 8px; color: var(--muted); }
+  .badge.warn { border-color: #e67700; color: #b35c00; display: inline-block; margin: 0; }
+  @media (max-width: 760px) { .recommendation { grid-template-columns: 1fr; } }
   @media (max-width: 760px) { .explorer { grid-template-columns: 1fr; } .tree { position: static; max-height: 40vh; border-right: 0; } }
 </style>
 <div class="explorer">
@@ -95,11 +110,16 @@
         <line data-row="adjacency" x1="{{ pad + s.x * scale }}" y1="{{ 24 + h / 2 + s.y * scale * 1.6 }}" x2="{{ pad + t.x * scale }}" y2="{{ 24 + h / 2 + t.y * scale * 1.6 }}" stroke="#c9ccd3" stroke-width="2"><title>{{ s.index }}–{{ j }}</title></line>
         {% endif %}{% endfor %}{% endfor %}
         {% for s in slots %}{% set blocked = s.index in adv.blocked_slots %}
-        <g data-row="seat" class="seat{{ ' blocked' if blocked }}{{ ' front' if s.column == 0 }}" transform="translate({{ pad + s.x * scale - w / 2 }},{{ 24 + s.y * scale * 1.6 }})">
+        {% set placed = recommendation.seats[loop.index0] if recommendation and recommendation.seats[loop.index0].champion else none %}
+        <g data-row="seat" class="seat{{ ' blocked' if blocked }}{{ ' front' if s.column == 0 }}{{ ' filled' if placed }}{{ ' main-dps' if placed and placed.is_main_dps }}" transform="translate({{ pad + s.x * scale - w / 2 }},{{ 24 + s.y * scale * 1.6 }})">
           <title>Slot {{ s.index }}{% if blocked %}: blocked by an escort{% endif %}</title>
           {% if blocked %}
           <rect width="{{ w }}" height="{{ h }}" rx="6" fill="#eeeef0" stroke="#8a8a8e" stroke-dasharray="4 3"/>
           <text x="{{ w / 2 }}" y="{{ h / 2 + 4 }}" text-anchor="middle" font-size="11" fill="#8a8a8e">Slot {{ s.index }} · blocked</text>
+          {% elif placed %}
+          <rect width="{{ w }}" height="{{ h }}" rx="6" fill="{{ '#e8ecfb' if placed.is_main_dps else '#fff' }}" stroke="{{ '#3b5bdb' if placed.is_main_dps else '#c9ccd3' }}" stroke-width="{{ 2 if placed.is_main_dps else 1 }}"/>
+          <text x="{{ w / 2 }}" y="{{ h / 2 - 3 }}" text-anchor="middle" font-size="12" font-weight="600" fill="#1d1d1f">{{ placed.champion.name }}</text>
+          <text x="{{ w / 2 }}" y="{{ h / 2 + 12 }}" text-anchor="middle" font-size="10" fill="{{ '#3b5bdb' if placed.is_main_dps else '#8a8a8e' }}">{{ placed.contribution_label }}</text>
           {% else %}
           <rect width="{{ w }}" height="{{ h }}" rx="6" fill="#fff" stroke="#c9ccd3" stroke-dasharray="2 3"/>
           <text x="{{ w / 2 }}" y="{{ h / 2 + 4 }}" text-anchor="middle" font-size="11" fill="#8a8a8e">Slot {{ s.index }} · empty</text>
@@ -111,6 +131,58 @@
       <p class="restrictions">No formation layout in the recorded Game Definitions.</p>
       {% endif %}
     </div>
+
+    {% if recommendation %}{% set rec = recommendation %}
+    <div class="recommendation">
+      <div class="rec-main">
+        {% if rec.infeasible_reason %}
+        <p class="infeasible" data-row="infeasible">{{ rec.infeasible_reason }}</p>
+        {% else %}
+        <p class="main-dps" data-row="main-dps">Main DPS: <strong>{{ rec.main_dps.champion.name }}</strong> · slot {{ rec.main_dps.slot }} · BUD {{ rec.main_dps.bud | sci }}</p>
+        {% endif %}
+        <table class="seats">
+          <thead><tr><th>Slot</th><th>Champion</th><th>Level</th><th>Contribution</th><th>Specialization</th><th>Feats</th></tr></thead>
+          <tbody>
+          {% for seat in rec.seats %}
+            {% if seat.blocked %}
+            <tr data-row="seat-row" class="blocked"><td>Slot {{ seat.slot }}</td><td colspan="5">blocked by an escort</td></tr>
+            {% elif not seat.champion %}
+            <tr data-row="seat-row" class="empty"><td>Slot {{ seat.slot }}</td><td colspan="5">empty</td></tr>
+            {% else %}
+            <tr data-row="seat-row" class="{{ 'main-dps' if seat.is_main_dps }}">
+              <td>Slot {{ seat.slot }}</td>
+              <td><a href="/champions/{{ seat.champion.id }}">{{ seat.champion.name }}</a></td>
+              <td>{% if seat.provided_by_adventure %}Lent by the adventure{% else %}Level {{ seat.level }}{% endif %}</td>
+              <td>{{ seat.contribution_label }}</td>
+              <td>{{ seat.specializations | map(attribute="name") | join(", ") or "—" }}</td>
+              <td>{{ seat.feats | map(attribute="name") | join(", ") or "—" }}</td>
+            </tr>
+            {% endif %}
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <aside class="rail">
+        {% if rec.score is not none %}
+        <p data-row="score" class="score">Score {{ rec.score | sci }} <span class="unit">{{ rec.score_label }}</span></p>
+        <p data-row="gap" class="gap">at most {{ "%.0f" % rec.gap_pct if rec.gap_pct >= 1 or rec.gap_pct == 0 else "%.1f" % rec.gap_pct }}% from best</p>
+        {% endif %}
+        {% if rec.unverified_champions %}
+        <p data-row="unverified-badge" class="badge warn">{{ rec.unverified_champions | length }} champion{{ 's' if rec.unverified_champions | length != 1 }} unverified, score may be off</p>
+        {% endif %}
+        <h3>Scoring Assumptions</h3>
+        <ul class="assumptions">
+          {% for a in rec.scoring_assumptions %}<li data-row="assumption">{{ a }}</li>{% endfor %}
+        </ul>
+        {% if rec.left_out %}
+        <h3>Left out</h3>
+        <ul class="left-out">
+          {% for l in rec.left_out %}<li data-row="left-out">{{ l.champion.name }}: {{ l.reason }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+      </aside>
+    </div>
+    {% endif %}
   </section>
 </div>
 {% endblock %}

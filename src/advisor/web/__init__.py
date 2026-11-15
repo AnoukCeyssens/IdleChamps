@@ -10,10 +10,16 @@ from fastapi.templating import Jinja2Templates
 
 from advisor.account import parse_account
 from advisor.catalogue import GEAR_SLOTS, ROLE_TAGS, parse_catalogue
+from advisor.champion_models import ChampionModels
 from advisor.explorer import RUN_GOALS, adventure_node, tree
 from advisor.game_client import OfflineGameClient
+from advisor.recommendation import recommend
 
 _TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
+_TEMPLATES.env.filters["sci"] = lambda x: f"{x:,.0f}" if 100 <= x < 1e6 else f"{x:.3g}" if x < 100 else f"{x:.2e}".replace("e+", "e")
+
+# Run Goals whose tab shows a Formation Recommendation so far (Push: #32, Gem Farm: #29).
+_RECOMMENDED_GOALS = ("Gold Farm",)
 
 
 def create_app(log_path: Path) -> FastAPI:
@@ -21,6 +27,8 @@ def create_app(log_path: Path) -> FastAPI:
     raw = OfflineGameClient(log_path).fetch()
     catalogue = parse_catalogue(raw)
     account = parse_account(raw)
+    models = ChampionModels(catalogue, account)
+    recommendations: dict[tuple, object] = {}  # computed on demand when a tab is opened
 
     app = FastAPI(title="Idle Champions Advisor", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -60,12 +68,20 @@ def create_app(log_path: Path) -> FastAPI:
             "goal": goal,
             "goals": RUN_GOALS,
             "patron": patron,
+            "recommendation": _recommendation(found, goal, patron) if goal in _RECOMMENDED_GOALS else None,
             "patrons": [
                 {"patron": catalogue.patron(pid), "area": area, "locked": pid not in account.unlocked_patron_ids}
                 for pid, area in found.patron_objectives.items()
             ],
         }
         return _TEMPLATES.TemplateResponse(request, "formation.html", context)
+
+    def _recommendation(found, goal, patron):
+        key = (found.id, goal, patron)
+        if key not in recommendations:
+            recommendations[key] = recommend(catalogue, account, found, goal, patron, models=models)
+        return recommendations[key]
+
     @app.get("/champions/{champion_id}", response_class=HTMLResponse)
     def champion_detail(request: Request, champion_id: int) -> HTMLResponse:
         champion = catalogue.find(champion_id)
