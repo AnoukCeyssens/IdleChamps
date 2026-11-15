@@ -7,6 +7,8 @@ The one place that knows what champions do. Formation Search only sees this inte
   - `scorer(layout, run_goal, main_dps)`: a `Scorer` for formations built around that Main DPS seat.
   - `status(champion_id)`: the champion's Model Status.
   - `assumptions(run_goal)`: the Scoring Assumptions every score for that goal rests on.
+  - `explain(champion_id)`: the ChampionExplanation, what each gear slot, feat and specialization
+    does at the player's gear in plain numbers (the champion page, #37).
 - `Scorer.score(seats)`: the formation's `FormationScore` (log score, BUD, each seat's contribution).
 - `Scorer.bound(seat)`: an optimistic log weight for one seat, never below what that seat adds to any
   formation with this Main DPS. The search builds its assignment and its gap from it.
@@ -178,6 +180,31 @@ _TARGETS = {
 }
 
 
+@dataclass(frozen=True)
+class EffectLine:
+    """One effect of a gear item, feat or specialization, as the model sees it for this account.
+    Exactly one of `modelled` (plain numbers at the player's gear, e.g. "+121% damage to all
+    champions"), `assumption` (the Scoring Assumption an uncomputable effect is scored under; filled
+    by per-champion reconstructions, #40) or `not_modelled` (why it isn't scored) is set."""
+
+    modelled: str | None = None
+    assumption: str | None = None
+    not_modelled: str | None = None
+
+
+@dataclass(frozen=True)
+class ChampionExplanation:
+    """Champion Models' second interface: what this champion's choices do for this account."""
+
+    champion_id: int
+    gear: Mapping[int, tuple[EffectLine, ...]]  # by slot, at the owned item's rarity, level and gild
+    feats: Mapping[int, tuple[EffectLine, ...]]  # by feat id (owned or not)
+    specializations: Mapping[int, tuple[EffectLine, ...]]  # by option (upgrade) id
+    gear_scaling: str = (
+        "Gear effects are taken at the item's rarity × gild (shiny ×1.5, golden ×2) × (1 + (item level − 1) ÷ 250)."
+    )
+
+
 class ChampionModels:
     def __init__(self, catalogue: Catalogue, account: Account, *, potions: Sequence[str] = ()) -> None:
         """`potions`: effect strings of potions in use. Only hints pass any (#34); the baseline has none."""
@@ -259,6 +286,111 @@ class ChampionModels:
         if run_goal == "Gem Farm":
             return (*GEM_FARM_ASSUMPTIONS, *common)
         return (*_SETUP_ASSUMPTIONS, *common)
+
+    def explain(self, champion_id: int) -> ChampionExplanation:
+        """Each gear slot, feat and specialization option with its effects at the player's current gear,
+        feats and specializations (buffs to an ability included)."""
+        owned = self.account.champions.get(champion_id)
+        current = Loadout(
+            tuple(owned.specialization_choices) if owned else (), tuple(sorted(owned.equipped_feats)) if owned else ()
+        )
+        buffs = _buffs(self._sources(champion_id, current))
+        gear = {}
+        for slot, held in (owned.gear if owned else {}).items():
+            item = self.catalogue.gear_item(champion_id, slot, held.rarity)
+            if item is None:
+                gear[slot] = (EffectLine(not_modelled="Not modelled: no item definition loaded for this slot."),)
+                continue
+            scale = _GILD_FACTOR.get(held.gild, 1.0) * (1 + (held.level - 1) / 250)
+            gear[slot] = tuple(self._line(champion_id, _scaled(e, scale), {}, None, buffs) for e in item.effects)
+        feat_ids = [*(owned.feats if owned else ()), *(f.id for f in self.catalogue.feats_of(champion_id))]
+        feats = {}
+        for feat_id in dict.fromkeys(feat_ids):
+            feat = self.catalogue.feats.get(feat_id)
+            feats[feat_id] = (
+                tuple(self._line(champion_id, e, {}, None, buffs) for e in feat.effects) if feat
+                else (EffectLine(not_modelled="Not modelled: no feat definition loaded."),)
+            )
+        specs = {}
+        for choice in self.catalogue.specializations.get(champion_id, ()):
+            for option in choice.options:
+                specs[option.id] = self._upgrade_lines(champion_id, option.id, buffs)
+        return ChampionExplanation(champion_id, gear, feats, specs)
+
+    def _upgrade_lines(self, champion_id: int, upgrade_id: int, buffs: Mapping[int, float]) -> tuple[EffectLine, ...]:
+        upgrade = self.catalogue.upgrades.get(upgrade_id)
+        if upgrade is None:
+            return (EffectLine(not_modelled="Not modelled: no upgrade definition loaded."),)
+        if _key(upgrade.effect) != "effect_def":
+            return (self._line(champion_id, upgrade.effect, {}, upgrade_id, buffs),)
+        ability = self.catalogue.effects.get(_int(_params(upgrade.effect), 0))
+        if ability is None:
+            return (EffectLine(not_modelled="Not modelled: the ability's definition isn't loaded."),)
+        return tuple(
+            self._line(champion_id, str(k.get("effect_string") or ""), k, upgrade_id, buffs) for k in ability.effect_keys
+        )
+
+    def _line(
+        self, champion_id: int, effect: str, fields: Mapping, upgrade_id: int | None, buffs: Mapping[int, float]
+    ) -> EffectLine:
+        """One effect string in plain numbers, as the generic layer scores it, or why it isn't scored."""
+        key, params = _key(effect), _params(effect)
+        breaker = key in _BREAK_EXTRA_KEYS or key in _BREAK_MULT_KEYS
+        if not (key in _DAMAGE_KEYS or key in _GOLD_KEYS or key in _BUFF_KEYS or breaker):
+            return EffectLine(not_modelled=f"Not modelled: {key or 'an empty effect'} is not a generic effect.")
+        if complex_fields := sorted(_COMPLEX_FIELDS & set(fields)):
+            return EffectLine(not_modelled=f"Not modelled: {key} depends on {', '.join(complex_fields)}.")
+        pct = _float(params, 0)
+        if key in _BUFF_KEYS:
+            names = [self._upgrade_name(u) for p in params[1:] if (u := _maybe_int(p)) is not None]
+            if pct is None or not names:
+                return EffectLine(not_modelled=f"Not modelled: {effect} isn't plain data.")
+            return EffectLine(modelled=f"+{_num(pct)}% to {' and '.join(names)}")
+        if breaker:
+            if pct is None and key == "increase_num_unique_hits":
+                pct = 1.0
+            raw = fields.get("targets")
+            if raw is None:
+                targets = ("all",) if key in _BREAK_MULT_KEYS else ("self",)
+            else:
+                targets = tuple(raw if isinstance(raw, list) else [raw])
+            if pct is None or pct <= 0 or not all(isinstance(t, str) and t in _TARGETS for t in targets):
+                return EffectLine(not_modelled=f"Not modelled: {effect} isn't plain data.")
+            kinds = (_BREAK_EXTRA_KEYS | _BREAK_MULT_KEYS)[key]
+            against = " and ".join(_BOSS_KINDS[k] for k in sorted(kinds))
+            who = self._targets_text(champion_id, targets)
+            if key in _BREAK_MULT_KEYS:
+                return EffectLine(modelled=f"+{_num(pct)}% hits by {who} against {against} monsters")
+            return EffectLine(modelled=f"+{_num(pct)} segments per hit by {who} against {against} monsters")
+        if pct is None:
+            return EffectLine(not_modelled=f"Not modelled: {effect} has no plain amount.")
+        if upgrade_id is not None:
+            pct *= 1 + buffs.get(upgrade_id, 0.0) / 100
+        targets = _targets(key, params, fields)
+        if targets is None:
+            return EffectLine(not_modelled=f"Not modelled: {key}'s targeting isn't plain data.")
+        if key in _GOLD_KEYS:
+            return EffectLine(modelled=f"+{_num(pct)}% gold")
+        return EffectLine(modelled=f"+{_num(pct)}% damage to {self._targets_text(champion_id, targets)}")
+
+    def _upgrade_name(self, upgrade_id: int) -> str:
+        upgrade = self.catalogue.upgrades.get(upgrade_id)
+        if upgrade is None:
+            return f"upgrade {upgrade_id} (definition not loaded)"
+        return upgrade.name or f"upgrade {upgrade_id}"
+
+    def _targets_text(self, champion_id: int, targets: tuple) -> str:
+        names = []
+        for target in targets:
+            if isinstance(target, tuple):
+                hero = self.catalogue.find(target[1])
+                names.append(hero.name if hero else f"champion {target[1]}")
+            elif target == "self":
+                hero = self.catalogue.find(champion_id)
+                names.append(hero.name if hero else "itself")
+            else:
+                names.append(_TARGET_TEXT.get(target, target))
+        return " and ".join(names)
 
     # --- generic effect layer ----------------------------------------------------------------
 
@@ -369,14 +501,7 @@ class ChampionModels:
 
     def _build_effects(self, champion_id: int, loadout: Loadout) -> tuple[_Effect, ...]:
         sources = self._sources(champion_id, loadout)
-        buffs: dict[int, float] = defaultdict(float)  # upgrade id -> % added to its effect
-        for _, effect, _fields in sources:
-            if _key(effect) in _BUFF_KEYS:
-                params = _params(effect)
-                pct = _float(params, 0)
-                for upgrade_id in params[1:]:
-                    if (u := _maybe_int(upgrade_id)) is not None and pct is not None:
-                        buffs[u] += pct
+        buffs = _buffs(sources)
 
         effects = []
         for upgrade_id, effect, fields in sources:
@@ -603,6 +728,42 @@ def _gem_rate(one_shot: float, growth: float, on_field: int, clicks: int) -> tup
         if value > best[0] + 1e-12:
             best = (value, reset)
     return best
+
+
+def _buffs(sources: Iterable[tuple[int | None, str, Mapping]]) -> dict[int, float]:
+    """Upgrade id -> % its effect is raised by (`buff_upgrade(s)` among the sources)."""
+    buffs: dict[int, float] = defaultdict(float)
+    for _, effect, _fields in sources:
+        if _key(effect) in _BUFF_KEYS:
+            params = _params(effect)
+            pct = _float(params, 0)
+            for upgrade_id in params[1:]:
+                if (u := _maybe_int(upgrade_id)) is not None and pct is not None:
+                    buffs[u] += pct
+    return buffs
+
+
+_BOSS_KINDS = {"armoured": "Armoured", "hits": "Hits-based"}
+_TARGET_TEXT = {
+    "all": "all champions",
+    "adj": "adjacent champions",
+    "non_adj": "non-adjacent champions",
+    "behind": "the adjacent champions behind",
+    "ahead": "the adjacent champions ahead",
+    "col": "champions in its column",
+    "next_col": "champions in the column behind",
+    "prev_col": "champions in the column ahead",
+    "prev_and_next_col": "champions in the columns ahead and behind",
+    "next_two_col": "champions in the two columns behind",
+    "prev_two_col": "champions in the two columns ahead",
+    "front_column": "champions in the front column",
+    "bud_setter": "the Main DPS",
+}
+
+
+def _num(value: float) -> str:
+    """A percentage in plain numbers: 120.96 → "121", 50.8 → "50.8"."""
+    return f"{value:,.0f}" if abs(value) >= 100 else f"{value:.3g}"
 
 
 def _pct(log: float) -> float:

@@ -134,6 +134,13 @@ class Recompute:
             self._fresh[(adventure.id, goal, patron)] = result
             self._old.pop((adventure.id, goal, patron), None)
 
+    def available(self) -> list[tuple[FormationRecommendation, bool]]:
+        """Every recommendation held now, without computing any: (recommendation, stale). A fresh
+        result hides the stale one for the same adventure × goal × patron."""
+        with self._lock:
+            old = [(rec, True) for key, rec in self._old.items() if key not in self._fresh]
+            return [(rec, False) for rec in self._fresh.values()] + old
+
     def progress(self) -> Progress:
         with self._lock:
             return Progress(self._pool is not None, self._done, self._total, self._completed)
