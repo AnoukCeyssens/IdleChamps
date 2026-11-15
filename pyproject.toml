@@ -1,0 +1,33 @@
+[project]
+name = "idlechamps-advisor"
+version = "0.1.0"
+description = "A personal, local advisor for Idle Champions of the Forgotten Realms."
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "jinja2>=3.1",
+    "ortools>=9.12",
+    "uvicorn>=0.32",
+]
+
+[project.scripts]
+advisor = "advisor.cli:main"
+advisor-build-fixture = "advisor.fixtures:main"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28",
+    "pytest>=8.3",
+]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "advisor"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient` is deprecated", "ignore:Bitwise inversion:DeprecationWarning"]

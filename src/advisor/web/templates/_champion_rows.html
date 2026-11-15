@@ -1,0 +1,30 @@
+{#- The filters swap in with the list, so each link keeps the other filter's choice. -#}
+{%- macro query(r, s) -%}
+/champions{% if r or s %}?{% endif %}{% if r %}role={{ r | urlencode }}{% endif %}{% if r and s %}&amp;{% endif %}{% if s %}status={{ s | urlencode }}{% endif %}
+{%- endmacro -%}
+<nav class="filters" aria-label="Filter by role tag">
+  <a href="{{ query(none, status) }}" hx-get="{{ query(none, status) }}" hx-target="#champions" hx-push-url="true"
+     data-row="role-filter" class="{{ 'active' if role is none }}">All</a>
+  {% for tag in role_tags %}
+  <a href="{{ query(tag, status) }}" hx-get="{{ query(tag, status) }}" hx-target="#champions" hx-push-url="true"
+     data-row="role-filter" class="{{ 'active' if role == tag }}">{{ tag }}</a>
+  {% endfor %}
+</nav>
+<nav class="filters" aria-label="Filter by Model Status">
+  <a href="{{ query(role, none) }}" hx-get="{{ query(role, none) }}" hx-target="#champions" hx-push-url="true"
+     data-row="status-filter" class="{{ 'active' if status is none }}">Any status</a>
+  {% for s in statuses %}
+  <a href="{{ query(role, s) }}" hx-get="{{ query(role, s) }}" hx-target="#champions" hx-push-url="true"
+     data-row="status-filter" class="{{ 'active' if status == s }}">{{ s }}</a>
+  {% endfor %}
+</nav>
+<p class="count">{{ rows | length }} champions{% if role %} tagged {{ role }}{% endif %}{% if status %} · {{ status }}{% endif %}</p>
+<ul class="champions">
+  {% for row in rows %}{% set c = row.champion %}
+  <li data-row="champion" class="champion {{ 'owned' if row.owned else 'unowned' }}">
+    <a class="name" href="/champions/{{ c.id }}">{{ c.name }}</a>
+    <span class="state">· {% if row.owned %}Level {{ row.owned.level }}{% else %}{{ c.source.label }}{% endif %}</span>
+    <span class="tags">· Seat {{ c.seat }}{% if c.role_tags %} · {{ c.role_tags | join(", ") }}{% endif %} · {{ row.status.value }}</span>
+  </li>
+  {% endfor %}
+</ul>

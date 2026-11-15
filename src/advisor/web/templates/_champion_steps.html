@@ -1,0 +1,18 @@
+{% macro pct(v) -%}{{ "%.0f" % v if v >= 10 else "%.1f" % v if v >= 0.1 else "%.2f" % v }}{%- endmacro %}
+{% if waiting %}
+<div data-row="champion-steps-loading" hx-get="/champions/{{ champion.id }}/next-steps?goal={{ goal | urlencode }}" hx-trigger="load delay:3s" hx-swap="outerHTML">{{ goal }}: measuring in the background, {{ waiting }} Focus adventure{{ 's' if waiting != 1 }} still to go…</div>
+{% else %}
+<div class="champion-steps">
+  <ol class="steps">
+    {% for s in steps %}
+    <li data-row="champion-step">
+      {{ goal }} <strong>+{{ pct(s.gain_pct) }}% on average</strong> · {{ s.reason }}
+      {% if s.unverified %}<span class="badge warn">unverified champion</span>{% endif %}
+      <span class="cost">Cost: {{ s.cost }}</span>
+    </li>
+    {% else %}
+    <li class="muted" data-row="no-champion-steps">No Next Step for {{ champion.name }} raises {{ goal }} on its <a href="/next-steps?goal={{ goal | urlencode }}">Focus Set</a>.</li>
+    {% endfor %}
+  </ol>
+</div>
+{% endif %}

@@ -1,0 +1,277 @@
+{% extends "base.html" %}
+{% set adv = node.adventure %}
+{% macro href(adventure_id, goal, patron=None) -%}
+/adventures/{{ adventure_id }}?goal={{ goal | urlencode }}{% if patron %}&patron={{ patron }}{% endif %}
+{%- endmacro %}
+{% macro tree_row(n, current, goal) -%}
+{%- set a = n.adventure -%}
+<a data-row="tree-adventure" href="{{ href(a.id, goal) }}"
+   class="adv {{ n.completion.kind }}{% if a.base_id %} variant{% endif %}{% if not n.running %} not-running{% endif %}{% if a.id == current %} on{% endif %}"
+   {% if a.id == current %}aria-current="page"{% endif %}>
+  <span class="name">{% if a.base_id %}↳ {% endif %}{{ a.name }}</span>
+  <span class="badges">{% if not n.running %} · <span class="badge">Not running</span>{% endif %} · <span class="badge {{ n.completion.kind }}">{{ n.completion.label }}</span></span>
+</a>
+{%- endmacro %}
+{% block title %}{{ adv.name }} · Idle Champions Advisor{% endblock %}
+{% block main %}
+<style>
+  main:has(.explorer) { max-width: 1280px; }
+  .explorer { display: grid; grid-template-columns: 300px 1fr; gap: 20px; align-items: start; }
+  .tree { border-right: 1px solid var(--line); padding-right: 12px; max-height: calc(100vh - 90px); overflow: auto; position: sticky; top: 8px; }
+  .tree details { margin-bottom: 6px; }
+  .tree summary { cursor: pointer; padding: 4px 0; font-weight: 600; }
+  .tree .adv { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 6px; padding: 3px 6px; border-radius: 4px; font-size: 13px; color: var(--fg); text-decoration: none; }
+  .tree .adv.variant { padding-left: 18px; font-size: 12px; }
+  .tree .adv.on { background: #e8ecfb; }
+  .tree .adv.not-running { color: var(--muted); }
+  .badge { display: inline-block; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line); font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .badge.done { border-color: #2f9e44; color: #2f9e44; }
+  .badge.best { border-color: #e67700; color: #e67700; }
+  .adv .badges { margin-left: auto; }
+  .head .context { color: var(--muted); font-size: 13px; }
+  .head h1 { margin: 2px 0 6px; }
+  .head .restrictions { color: var(--muted); font-size: 13px; margin: 4px 0; white-space: pre-line; }
+  .head .focus-toggles { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
+  .head .focus-toggles form { margin: 0; }
+  .head .focus-toggles button { font: inherit; font-size: 12px; padding: 1px 10px; border: 1px solid var(--line); border-radius: 12px; background: #fff; cursor: pointer; }
+  .head .focus-toggles button.pinned { border-color: var(--accent); color: var(--accent); }
+  .chips, .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+  .chip { padding: 2px 10px; border: 1px solid var(--line); border-radius: 12px; color: var(--fg); text-decoration: none; font-size: 13px; }
+  .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .chip.locked { border-style: dashed; color: var(--muted); }
+  .chip.on.locked { color: #fff; }
+  .tabs a { padding: 6px 14px; border-bottom: 2px solid transparent; color: var(--fg); text-decoration: none; }
+  .tabs a.on { border-color: var(--accent); font-weight: 600; }
+  .grid-panel { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center; }
+  .recommendation { display: grid; grid-template-columns: 1fr 300px; gap: 16px; margin-top: 14px; align-items: start; }
+  .main-dps { font-size: 16px; margin: 0 0 10px; }
+  .infeasible { padding: 10px 12px; border: 1px solid #e67700; border-radius: 6px; color: #b35c00; background: #fff8ef; }
+  table.seats { width: 100%; border-collapse: collapse; font-size: 13px; background: #fff; }
+  table.seats th, table.seats td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+  table.seats tr.main-dps { background: #e8ecfb; }
+  table.seats tr.blocked, table.seats tr.empty { color: var(--muted); }
+  .rail { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 12px; font-size: 13px; }
+  .rail h3 { font-size: 13px; margin: 12px 0 4px; }
+  .rail ul { margin: 0; padding-left: 18px; }
+  .rail .score { font-size: 18px; font-weight: 600; margin: 0; }
+  .rail .score .unit { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
+  .rail .gap { margin: 2px 0 8px; color: var(--muted); }
+  .rail table.modron-grid { border-collapse: collapse; font-size: 10px; margin: 4px 0; }
+  .rail table.modron-grid td { width: 22px; height: 18px; text-align: center; border: 1px solid var(--line); }
+  .rail table.modron-grid td.node { background: #eef1fb; }
+  .badge.warn { border-color: #e67700; color: #b35c00; display: inline-block; margin: 0; }
+  .rail .exact { margin: 2px 0 8px; color: #2f9e44; }
+  .rail .prove { margin: 4px 0 10px; }
+  .rail .prove .htmx-indicator { display: none; color: var(--muted); margin-left: 6px; }
+  .rail .prove.htmx-request .htmx-indicator { display: inline; }
+  .push-verdict { margin: 0 0 10px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; font-size: 14px; }
+  .push-verdict.reached, .push-verdict.likely { border-color: #2f9e44; }
+  .push-verdict.borderline, .push-verdict.not_available, .push-verdict.no_estimate { border-color: #e67700; }
+  .push-verdict.unlikely { border-color: #c92a2a; }
+  .push-verdict .muted { color: var(--muted); font-size: 12px; }
+  @media (max-width: 760px) { .recommendation { grid-template-columns: 1fr; } }
+  @media (max-width: 760px) { .explorer { grid-template-columns: 1fr; } .tree { position: static; max-height: 40vh; border-right: 0; } }
+</style>
+<div class="explorer">
+  <nav class="tree" aria-label="Adventures">
+    {% for c in tree %}
+    <details {% if c.campaign.id == adv.campaign_id %}open{% endif %}>
+      <summary><span data-row="tree-campaign" class="{{ 'event' if c.campaign.is_event }}{{ ' not-running' if not c.running }}"><span class="campaign-name">{{ c.campaign.name }}</span><span class="badges">{% if c.campaign.is_event %} · <span class="badge">{{ 'Running' if c.running else 'Not running' }}</span>{% endif %}</span></span></summary>
+      {% for n in c.adventures %}
+        {{ tree_row(n, adv.id, goal) }}
+        {% for v in n.variants %}{{ tree_row(v, adv.id, goal) }}{% endfor %}
+      {% endfor %}
+    </details>
+    {% endfor %}
+  </nav>
+
+  <section id="formation">
+    <div class="head" data-row="adventure-header">
+      <div class="context">
+        <span data-row="header-campaign">{{ campaign.name }}</span>
+        {% if adv.base_id %} · <span data-row="header-base">Variant of {{ base.name if base else "adventure " ~ adv.base_id }}</span>{% endif %}
+      </div>
+      <h1>{{ adv.name }}</h1>
+      <div>
+        <span data-row="header-objective">{% if patron %}Objective: area {{ adv.patron_objectives[patron] }} ({{ patrons | selectattr("patron.id", "equalto", patron) | map(attribute="patron.name") | first }}){% elif adv.objective_area %}Objective: area {{ adv.objective_area }}{% else %}Free play: no objective{% endif %}</span>
+        {% if not node.running %} · <span class="badge" data-row="header-badge">Not running</span>{% endif %}
+        · <span class="badge {{ node.completion.kind }}" data-row="header-badge">{{ node.completion.label }}</span>
+      </div>
+      {% if adv.restrictions_text %}<p class="restrictions" data-row="header-restrictions">{{ adv.restrictions_text }}</p>{% endif %}
+      <div class="focus-toggles">
+        {% for g, pinned in focus_goals %}
+        <form method="post" action="/adventures/{{ adv.id }}/focus?goal={{ g | urlencode }}&pin={{ 'false' if pinned else 'true' }}">
+          <button type="submit" data-row="focus-toggle" class="{{ 'pinned' if pinned }}">{{ 'Unpin from' if pinned else 'Pin to' }} {{ g }} Focus Set</button>
+        </form>
+        {% endfor %}
+      </div>
+    </div>
+
+    <nav class="chips" aria-label="Patron">
+      <a data-row="patron-chip" class="chip {{ 'on' if patron is none }}" href="{{ href(adv.id, goal) }}">No patron</a>
+      {% for p in patrons %}
+      <a data-row="patron-chip" class="chip{{ ' on' if p.patron.id == patron }}{{ ' locked' if p.locked }}" href="{{ href(adv.id, goal, p.patron.id) }}"
+         {% if p.locked %}title="Patron not unlocked"{% endif %}>{{ p.patron.name }} · area {{ p.area }}{% if p.locked %} · locked{% endif %}</a>
+      {% endfor %}
+    </nav>
+
+    <nav class="tabs" aria-label="Run Goal">
+      {% for g in goals %}
+      <a data-row="run-goal" class="{{ 'on' if g == goal }}" href="{{ href(adv.id, g, patron) }}" {% if g == goal %}aria-current="page"{% endif %}>{{ g }}</a>
+      {% endfor %}
+    </nav>
+
+    <div class="grid-panel">
+      {% set slots = adv.layout %}
+      {% if slots %}
+      {%- set scale = 6 -%}{%- set w = 96 -%}{%- set h = 44 -%}{%- set pad = 56 -%}
+      {%- set maxx = slots | map(attribute="x") | max -%}{%- set maxy = slots | map(attribute="y") | max -%}
+      {%- set W = maxx * scale + pad * 2 -%}{%- set H = maxy * scale * 1.6 + h + 40 -%}
+      <svg viewBox="0 0 {{ W }} {{ H }}" width="{{ W }}" style="max-width:100%;height:auto" role="img" aria-label="Seat grid">
+        <text data-row="front-marker" x="{{ W - 6 }}" y="14" text-anchor="end" font-size="11" fill="#8a8a8e">front ▸</text>
+        {% for s in slots %}{% for j in s.adjacent %}{% if j > s.index and j < slots | length %}{% set t = slots[j] %}
+        <line data-row="adjacency" x1="{{ pad + s.x * scale }}" y1="{{ 24 + h / 2 + s.y * scale * 1.6 }}" x2="{{ pad + t.x * scale }}" y2="{{ 24 + h / 2 + t.y * scale * 1.6 }}" stroke="#c9ccd3" stroke-width="2"><title>{{ s.index }}–{{ j }}</title></line>
+        {% endif %}{% endfor %}{% endfor %}
+        {% for s in slots %}{% set blocked = s.index in adv.blocked_slots %}
+        {% set placed = recommendation.seats[loop.index0] if recommendation and recommendation.seats[loop.index0].champion else none %}
+        <g data-row="seat" class="seat{{ ' blocked' if blocked }}{{ ' front' if s.column == 0 }}{{ ' filled' if placed }}{{ ' main-dps' if placed and placed.is_main_dps }}{{ ' familiar' if placed and placed.familiar_id is not none }}" transform="translate({{ pad + s.x * scale - w / 2 }},{{ 24 + s.y * scale * 1.6 }})">
+          <title>Slot {{ s.index }}{% if blocked %}: blocked by an escort{% endif %}</title>
+          {% if blocked %}
+          <rect width="{{ w }}" height="{{ h }}" rx="6" fill="#eeeef0" stroke="#8a8a8e" stroke-dasharray="4 3"/>
+          <text x="{{ w / 2 }}" y="{{ h / 2 + 4 }}" text-anchor="middle" font-size="11" fill="#8a8a8e">Slot {{ s.index }} · blocked</text>
+          {% elif placed %}
+          <rect width="{{ w }}" height="{{ h }}" rx="6" fill="{{ '#e8ecfb' if placed.is_main_dps else '#fff' }}" stroke="{{ '#3b5bdb' if placed.is_main_dps else '#c9ccd3' }}" stroke-width="{{ 2 if placed.is_main_dps else 1 }}"/>
+          <text x="{{ w / 2 }}" y="{{ h / 2 - 3 }}" text-anchor="middle" font-size="12" font-weight="600" fill="#1d1d1f">{{ placed.champion.name }}</text>
+          <text x="{{ w / 2 }}" y="{{ h / 2 + 12 }}" text-anchor="middle" font-size="10" fill="{{ '#3b5bdb' if placed.is_main_dps else '#8a8a8e' }}">{{ placed.contribution_label }}</text>
+          {% if placed.familiar_id is not none %}
+          <circle cx="{{ w - 8 }}" cy="8" r="6" fill="#f3d36b" stroke="#b38f00"/>
+          <text x="{{ w / 2 }}" y="{{ h + 11 }}" text-anchor="middle" font-size="10" fill="#b38f00">Familiar {{ placed.familiar_id }}</text>
+          {% endif %}
+          {% else %}
+          <rect width="{{ w }}" height="{{ h }}" rx="6" fill="#fff" stroke="#c9ccd3" stroke-dasharray="2 3"/>
+          <text x="{{ w / 2 }}" y="{{ h / 2 + 4 }}" text-anchor="middle" font-size="11" fill="#8a8a8e">Slot {{ s.index }} · empty</text>
+          {% endif %}
+        </g>
+        {% endfor %}
+      </svg>
+      {% else %}
+      <p class="restrictions">No formation layout in the recorded Game Definitions.</p>
+      {% endif %}
+    </div>
+
+    {% if recommendation and stale %}
+    <p class="infeasible" data-row="stale-result">Out of date: this recommendation is from before your last Refresh. A Recompute is running (progress in the header).</p>
+    {% endif %}
+    {% if recommendation %}{% set rec = recommendation %}
+    <div class="recommendation">
+      <div class="rec-main">
+        {% if rec.infeasible_reason %}
+        <p class="infeasible" data-row="infeasible">{{ rec.infeasible_reason }}</p>
+        {% else %}
+        <p class="main-dps" data-row="main-dps">Main DPS: <strong>{{ rec.main_dps.champion.name }}</strong> · slot {{ rec.main_dps.slot }} · BUD {{ rec.main_dps.bud | sci }}</p>
+        {% endif %}
+        {% if rec.push_verdict %}{% set pv = rec.push_verdict %}
+        <div class="push-verdict {{ pv.kind }}">
+          <strong data-row="push-verdict" class="{{ pv.kind }}">{{ pv.label }}</strong>
+          {% if pv.expected_area is not none %}
+          · <span data-row="push-estimate">Expected to reach ~{{ pv.expected_area }} (±{{ pv.band }}){% if pv.objective %} · objective {{ pv.objective }}{% endif %}</span>
+          {% endif %}
+          {% if pv.capped %}<span class="muted" data-row="push-cap">(capped: monster positions unknown)</span>{% endif %}
+          · <span data-row="best-here">best here: {{ pv.best_area if pv.best_area is not none else "none" }}</span>
+        </div>
+        {% endif %}
+        <table class="seats">
+          <thead><tr><th>Slot</th><th>Champion</th><th>Level</th><th>Contribution</th><th>Specialization</th><th>Feats</th></tr></thead>
+          <tbody>
+          {% for seat in rec.seats %}
+            {% if seat.blocked %}
+            <tr data-row="seat-row" class="blocked"><td>Slot {{ seat.slot }}</td><td colspan="5">blocked by an escort</td></tr>
+            {% elif not seat.champion %}
+            <tr data-row="seat-row" class="empty"><td>Slot {{ seat.slot }}</td><td colspan="5">empty</td></tr>
+            {% else %}
+            <tr data-row="seat-row" class="{{ 'main-dps' if seat.is_main_dps }}">
+              <td>Slot {{ seat.slot }}</td>
+              <td><a href="/champions/{{ seat.champion.id }}">{{ seat.champion.name }}</a></td>
+              <td>{% if seat.provided_by_adventure %}Lent by the adventure{% else %}Level {{ seat.level }}{% endif %}</td>
+              <td>{{ seat.contribution_label }}</td>
+              <td>{{ seat.specializations | map(attribute="name") | join(", ") or "—" }}</td>
+              <td>{{ seat.feats | map(attribute="name") | join(", ") or "—" }}</td>
+            </tr>
+            {% endif %}
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <aside class="rail">
+        {% if rec.push_verdict and rec.push_verdict.placement_hint %}
+        <p data-row="placement-hint" class="placement-hint">{{ rec.push_verdict.placement_hint }}</p>
+        {% endif %}
+        {% if rec.score is not none %}
+        <p data-row="score" class="score">Score {{ rec.score | sci }} <span class="unit">{{ rec.score_label }}</span></p>
+        <p data-row="gap" class="gap">at most {{ "%.0f" % rec.gap_pct if rec.gap_pct >= 1 or rec.gap_pct == 0 else "%.1f" % rec.gap_pct }}% from best</p>
+        {% endif %}
+        {% if rec.exact_solve == "improved" %}
+        <p data-row="exact-outcome" class="exact">Exact: the exact solve found a better formation</p>
+        {% elif rec.exact_solve == "proven" %}
+        <p data-row="exact-outcome" class="exact">Proven best: exact solve found nothing better</p>
+        {% elif rec.exact_solve == "timed_out" %}
+        <p data-row="exact-outcome" class="exact">Exact solve stopped at its time limit: nothing better found</p>
+        {% endif %}
+        {% if rec.main_dps and (rec.gap_pct != 0 or not rec.exact_solve) %}
+        {% set prove_url %}/adventures/{{ adv.id }}/prove?goal={{ goal | urlencode }}{% if patron %}&patron={{ patron }}{% endif %}{% endset %}
+        <form data-row="prove" class="prove" method="post" action="{{ prove_url }}"
+              hx-post="{{ prove_url }}" hx-target="#formation" hx-select="#formation" hx-swap="outerHTML"
+              hx-indicator="this" hx-disabled-elt="find button">
+          <button type="submit">Prove it's the best</button>
+          <span class="htmx-indicator">Solving, up to 60 s…</span>
+        </form>
+        {% endif %}
+        {% if rec.unverified_champions %}
+        <p data-row="unverified-badge" class="badge warn">{{ rec.unverified_champions | length }} champion{{ 's' if rec.unverified_champions | length != 1 }} unverified, score may be off</p>
+        {% endif %}
+        {% if rec.familiars %}
+        <h3>Familiars</h3>
+        <ul class="familiars">
+          {% for f in rec.familiars %}<li data-row="familiar">{{ f.name }}: {% if f.slot is not none %}slot {{ f.slot }} ({{ f.champion.name }}){% else %}on clicks{% endif %}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {% if rec.modron %}{% set m = rec.modron %}
+        <h3>Modron core</h3>
+        <p data-row="modron-core">{{ m.name }} · {{ m.experience }} experience · {{ m.nodes }} node{{ 's' if m.nodes != 1 }}</p>
+        <p data-row="modron-reset-area">{% if m.reset_area %}Reset area {{ m.reset_area }} ({{ 'recommended' if m.reset_area_optimised else 'as saved' }}){% else %}No reset{% endif %}</p>
+        {% if m.node_layout %}
+        <table class="modron-grid" aria-label="Node layout (saved)">
+          {% for row in m.node_layout %}<tr data-row="modron-node-row">{% for tile in row %}<td class="{{ 'node' if tile else 'empty' }}" title="{{ 'Tile ' ~ tile if tile else 'empty' }}">{{ tile or '' }}</td>{% endfor %}</tr>{% endfor %}
+        </table>
+        {% endif %}
+        {% endif %}
+        {% if rec.comparisons %}
+        <h3>Compared with</h3>
+        <ul class="comparisons">
+          {% for c in rec.comparisons %}
+          <li data-row="comparison" class="{{ c.source }}{{ ' unavailable' if c.pct_weaker is none }}">{{ c.label }}: {{ c.verdict }}{% if c.citation %} · <a href="{{ c.citation }}" data-row="comparison-source">source</a>{% endif %}
+            {% if c.top_effects %}<ul>{% for e in c.top_effects %}<li data-row="comparison-effect">{{ e }}</li>{% endfor %}</ul>{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+        <h3>Scoring Assumptions</h3>
+        <ul class="assumptions">
+          {% for a in rec.scoring_assumptions %}<li data-row="assumption">{{ a }}</li>{% endfor %}
+        </ul>
+        {% if not rec.infeasible_reason %}
+        <h3>What would make this better</h3>
+        <div data-row="hints-loading" hx-get="/adventures/{{ adv.id }}/hints?goal={{ goal | urlencode }}{% if patron %}&patron={{ patron }}{% endif %}" hx-trigger="load" hx-swap="outerHTML">Finding upgrades…</div>
+        {% endif %}
+        {% if rec.left_out %}
+        <h3>Left out</h3>
+        <ul class="left-out">
+          {% for l in rec.left_out %}<li data-row="left-out">{{ l.champion.name }}: {{ l.reason }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+      </aside>
+    </div>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
