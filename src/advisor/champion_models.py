@@ -325,6 +325,7 @@ class ChampionModels:
         self.potions = tuple(potions)
         self.statuses = dict(statuses or {})
         self._effects = cache(self._build_effects)
+        self.reach_groups = cache(self._build_reach_groups)
         self._break_effects = cache(self._build_break_effects)
         self.break_ceiling = cache(self._build_break_ceiling)
         self._potion_effects = cache(self._build_potion_effects)
@@ -607,6 +608,21 @@ class ChampionModels:
 
     def effects(self, champion_id: int, loadout: Loadout) -> tuple[_Effect, ...]:
         return self._effects(champion_id, loadout)
+
+    def _build_reach_groups(self, champion_id: int, loadout: Loadout) -> tuple[float, tuple[tuple[tuple, float], ...]]:
+        """A seat's own effects summed for `Scorer.bound`: (log gold multiplier, ((targets, log damage
+        multiplier), ...)), one entry per distinct targets, so where they land is checked once per
+        targets rather than once per effect. "Per matching champion" effects are left out (counted
+        through the Main DPS)."""
+        gold, by_targets = 0.0, {}
+        for effect in self._effects(champion_id, loadout):
+            if effect.per:
+                continue
+            if effect.kind == "gold":
+                gold += effect.log
+            else:
+                by_targets[effect.targets] = by_targets.get(effect.targets, 0.0) + effect.log
+        return gold, tuple(by_targets.items())
 
     def base_damage(self, champion_id: int) -> float:
         champion = self.catalogue.find(champion_id)
@@ -926,14 +942,8 @@ class Scorer:
 
     def _reach(self, seat: Seat) -> tuple[float, float]:
         """Log damage multiplier this seat's own effects give the Main DPS, and log gold multiplier."""
-        damage = gold = 0.0
-        for effect in self.models.effects(seat.champion_id, seat.loadout):
-            if effect.per:
-                continue  # counted through the Main DPS (`_per_matches`)
-            if effect.kind == "gold":
-                gold += effect.log
-            elif self._reaches(effect.targets, seat):
-                damage += effect.log
+        gold, groups = self.models.reach_groups(seat.champion_id, seat.loadout)
+        damage = sum(log for targets, log in groups if self._reaches(targets, seat))
         return damage, gold
 
     def _per_matches(self, seat: Seat) -> float:
