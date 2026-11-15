@@ -32,6 +32,14 @@ def client() -> TestClient:
     return TestClient(create_app(FIXTURE_LOG))
 
 
+@pytest.fixture
+def live(tmp_path):
+    """Live mode against a fake game server replaying recorded responses (see `fake_game`)."""
+    from fake_game import Live
+
+    return Live(tmp_path)
+
+
 class _Rows(HTMLParser):
     """Collects the elements marked `data-row="<kind>"` with their classes and visible text."""
 
