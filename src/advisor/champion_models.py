@@ -146,10 +146,13 @@ _TARGETS = {
 
 
 class ChampionModels:
-    def __init__(self, catalogue: Catalogue, account: Account) -> None:
+    def __init__(self, catalogue: Catalogue, account: Account, *, potions: Sequence[str] = ()) -> None:
+        """`potions`: effect strings of potions in use. Only hints pass any (#34); the baseline has none."""
         self.catalogue = catalogue
         self.account = account
+        self.potions = tuple(potions)
         self._effects = cache(self._build_effects)
+        self._potion_effects = cache(self._build_potion_effects)
 
     # --- interface ---------------------------------------------------------------------------
 
@@ -225,6 +228,18 @@ class ChampionModels:
     def base_damage(self, champion_id: int) -> float:
         champion = self.catalogue.find(champion_id)
         return champion.base_damage if champion and champion.base_damage > 0 else 1.0
+
+    def potion_effects(self) -> tuple[_Effect, ...]:
+        """The potions' generic effects; they reach every champion, so the Main DPS."""
+        return self._potion_effects()
+
+    def _build_potion_effects(self) -> tuple[_Effect, ...]:
+        found = []
+        for effect in self.potions:
+            key, pct = _key(effect), _float(_params(effect), 0)
+            if pct is not None and (key in _DAMAGE_KEYS or key in _GOLD_KEYS):
+                found.append(_Effect("gold" if key in _GOLD_KEYS else "damage", math.log(max(1e-9, 1 + pct / 100)), ("all",)))
+        return tuple(found)
 
     def _feat_is_scorable(self, feat_id: int) -> bool:
         feat = self.catalogue.feats.get(feat_id)
@@ -331,6 +346,9 @@ class Scorer:
             seats = (self.main_dps, *seats)
         damage_log = math.log(self.models.base_damage(self.main_dps.champion_id))
         gold_log = 0.0
+        for effect in self.models.potion_effects():
+            damage_log += effect.log if effect.kind == "damage" else 0.0
+            gold_log += effect.log if effect.kind == "gold" else 0.0
         contributions = {}
         for seat in seats:
             damage, gold = self._reach(seat)

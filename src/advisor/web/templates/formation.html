@@ -232,6 +232,10 @@
         <ul class="assumptions">
           {% for a in rec.scoring_assumptions %}<li data-row="assumption">{{ a }}</li>{% endfor %}
         </ul>
+        {% if not rec.infeasible_reason %}
+        <h3>What would make this better</h3>
+        <div data-row="hints-loading" hx-get="/adventures/{{ adv.id }}/hints?goal={{ goal | urlencode }}{% if patron %}&patron={{ patron }}{% endif %}" hx-trigger="load" hx-swap="outerHTML">Finding upgrades…</div>
+        {% endif %}
         {% if rec.left_out %}
         <h3>Left out</h3>
         <ul class="left-out">
