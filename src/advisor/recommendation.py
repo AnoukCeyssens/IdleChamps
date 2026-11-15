@@ -8,7 +8,7 @@ hints, comparisons, Push Verdict) are present and empty.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from advisor.account import Account
 from advisor.catalogue import Adventure, Catalogue, Champion, Feat, Patron, Restriction, SpecializationOption
@@ -68,6 +68,8 @@ class FormationRecommendation:
     hints: tuple = ()
     comparisons: tuple = ()
     push_verdict: object | None = None
+    # The search this recommendation came from (candidates after restrictions), for one-change hints (#34).
+    problem: SearchProblem | None = field(default=None, compare=False, repr=False)
 
 
 def recommend(
@@ -210,6 +212,7 @@ def recommend(
         scoring_assumptions=models.assumptions(run_goal),
         unverified_champions=unverified,
         left_out=tuple(sorted(left_out, key=lambda l: (l.champion.seat, l.champion.id))),
+        problem=problem,
     )
 
 

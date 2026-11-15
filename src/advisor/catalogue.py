@@ -164,6 +164,17 @@ class Feat:
 
 
 @dataclass(frozen=True)
+class Potion:
+    """A potion from `buff_defines` (rows whose name says Potion): a temporary buff. The advisor only
+    offers potions as hints, never in a recommendation's baseline."""
+
+    id: int
+    name: str
+    description: str = ""
+    effects: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Upgrade:
     """A level-gated champion upgrade. `effect` is the game's compact effect string: a key with its
     parameters (`hero_dps_multiplier_mult,400`) or a link to an ability (`effect_def,568`)."""
@@ -203,6 +214,8 @@ class Catalogue:
     # Upgrades and abilities by id; only those whose definitions have been loaded.
     upgrades: Mapping[int, Upgrade] = field(default_factory=dict)
     effects: Mapping[int, EffectDefinition] = field(default_factory=dict)
+    # Potions by id (`buff_defines` rows named "Potion ..."); only those whose definitions have been loaded.
+    potions: Mapping[int, Potion] = field(default_factory=dict)
 
     def upgrades_of(self, champion_id: int) -> tuple[Upgrade, ...]:
         return tuple(sorted((u for u in self.upgrades.values() if u.champion_id == champion_id), key=lambda u: u.id))
@@ -254,6 +267,7 @@ def parse_catalogue(raw: RawResponses) -> Catalogue:
         feats=_feats(_table(raw, "hero_feat_defines")),
         upgrades=_upgrades(_table(raw, "upgrade_defines")),
         effects=_effects(_table(raw, "effect_defines")),
+        potions=_potions(_table(raw, "buff_defines")),
         campaigns=tuple(
             sorted(
                 (_campaign(c, _favor_names(_table(raw, "reset_currency_defines"))) for c in campaign_defines),
@@ -473,6 +487,17 @@ def _effects(rows: list[dict]) -> dict[int, EffectDefinition]:
         )
         for row in rows
     }
+
+
+def _potions(rows: list[dict]) -> dict[int, Potion]:
+    """Shape guessed (id, name, description, `effect` string or `effects` list); unverified."""
+    found = {}
+    for row in rows:
+        if "potion" not in str(row.get("name") or "").lower():
+            continue
+        effects = row.get("effects") if isinstance(row.get("effects"), list) else [row.get("effect")]
+        found[int(row["id"])] = Potion(int(row["id"]), row["name"], row.get("description") or "", _effect_strings(effects))
+    return found
 
 
 def _gear(loot: list[dict]) -> dict[tuple[int, int, int], GearItem]:

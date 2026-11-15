@@ -16,6 +16,7 @@ from advisor.account import Account, parse_account
 from advisor.catalogue import GEAR_SLOTS, ROLE_TAGS, Catalogue, parse_catalogue
 from advisor.champion_models import ChampionModels
 from advisor.explorer import RUN_GOALS, adventure_node, tree
+from advisor.hints import hints as one_change_hints
 from advisor.history import write_history
 from advisor.game_client import DEFAULT_LOG, HttpTransport, LiveGameClient, OfflineGameClient, Transport
 from advisor.recommendation import recommend
@@ -37,6 +38,7 @@ def create_app(log_path: Path | None = None, *, live: Refresher | None = None) -
     catalogue, account = Catalogue(champions=()), Account(champions={})
     models = ChampionModels(catalogue, account)
     recommendations: dict[tuple, object] = {}  # computed on demand when a tab is opened
+    hints: dict[tuple, tuple] = {}  # "What would make this better", computed when a recommendation is opened
 
     def load(responses: RawResponses) -> None:
         """(Re)build everything the pages show from raw responses (at start and after a Refresh)."""
@@ -48,6 +50,7 @@ def create_app(log_path: Path | None = None, *, live: Refresher | None = None) -
         account = parse_account(raw)
         models = ChampionModels(catalogue, account)
         recommendations.clear()
+        hints.clear()
 
     load(raw)
     app = FastAPI(
@@ -115,6 +118,22 @@ def create_app(log_path: Path | None = None, *, live: Refresher | None = None) -
         if key not in recommendations:
             recommendations[key] = recommend(catalogue, account, found, goal, patron, models=models)
         return recommendations[key]
+
+    @app.get("/adventures/{adventure_id}/hints", response_class=HTMLResponse)
+    def adventure_hints(
+        request: Request, adventure_id: int, goal: str = RUN_GOALS[0], patron: int | None = None
+    ) -> HTMLResponse:
+        """The right rail's hints, loaded by the Formation view once the recommendation is shown."""
+        found = catalogue.adventure(adventure_id)
+        if found is None:
+            raise HTTPException(404, "No such adventure")
+        patron = patron if patron in found.patron_objectives else None
+        rec = _recommendation(found, goal, patron) if goal in _RECOMMENDED_GOALS else None
+        key = (found.id, goal, patron)
+        if rec is not None and key not in hints:
+            hints[key] = one_change_hints(catalogue, account, rec, models=models)
+        metric = rec.score_label.removesuffix(" (relative)") if rec else ""
+        return _TEMPLATES.TemplateResponse(request, "_hints.html", {"hints": hints.get(key, ()), "metric": metric})
 
     @app.get("/champions/{champion_id}", response_class=HTMLResponse)
     def champion_detail(request: Request, champion_id: int) -> HTMLResponse:

@@ -1,0 +1,7 @@
+<ul class="hints">
+  {% for h in hints %}
+  <li data-row="hint">{{ h.change.action }} → +{{ "%.0f" % h.gain_pct if h.gain_pct >= 10 else "%.1f" % h.gain_pct if h.gain_pct >= 0.1 else "%.2f" % h.gain_pct }}% {{ metric }}</li>
+  {% else %}
+  <li data-row="no-hints">Nothing in reach raises this score.</li>
+  {% endfor %}
+</ul>
