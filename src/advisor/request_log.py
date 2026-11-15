@@ -16,6 +16,7 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 SEPARATOR = "*" * 50
 
@@ -69,6 +70,26 @@ def read_responses(path: Path) -> dict[str, Any]:
             continue
         responses[match.group(1).lower()] = body
     return responses
+
+
+def read_credentials(path: Path) -> dict[str, str] | None:
+    """The latest `user_id` and `hash` found in the log's request URLs, or None.
+
+    Read at Refresh time only; the caller holds them in memory and never persists them.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if path.suffix == ".gz":
+        raw = gzip.decompress(raw)
+    found = None
+    for block in raw.decode("utf-8", errors="replace").split(SEPARATOR):
+        url = block.strip().split("\n", 1)[0]
+        query = parse_qs(urlsplit(url).query)
+        if query.get("user_id") and query.get("hash"):
+            found = {"user_id": query["user_id"][0], "hash": query["hash"][0]}
+    return found
 
 
 def strip_credentials(value: Any) -> Any:

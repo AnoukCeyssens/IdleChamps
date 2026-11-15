@@ -29,8 +29,13 @@ def test_host_cannot_be_widened(served):
     assert served == []
 
 
-def test_without_from_log_it_refuses_until_live_mode_exists(served, capsys):
-    with pytest.raises(SystemExit):
-        main([])
-    assert "--from-log" in capsys.readouterr().err
-    assert served == []
+def test_without_from_log_it_starts_live_mode_on_the_data_folder(served, tmp_path):
+    data_dir = tmp_path / "data"
+
+    main(["--data-dir", str(data_dir)])
+
+    [(app, options)] = served
+    assert options["host"] == "127.0.0.1"
+    page = TestClient(app).get("/champions").text  # not entered: no startup Refresh, no network
+    assert rows(page, "refresh-state")[0]["text"] == "Not refreshed yet"
+    assert rows(page, "refresh-button")[0]["text"] == "Refresh"
